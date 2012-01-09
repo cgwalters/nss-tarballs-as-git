@@ -1,0 +1,44 @@
+prefix=@prefix@
+nspr_prefix=@NSPR_PREFIX@
+nspr_libdir=@NSPR_LIBDIR@
+libdir=@libdir@
+
+DISTDIR = $(CURDIR)/mozilla/dist
+
+ARGS = \
+	MOZILLA_CLIENT=1 \
+	NSPR_INCLUDE_DIR=$(nspr_prefix)/include/nspr \
+	NSPR_LIB_DIR=$(nspr_libdir) \
+	SOURCE_MD_DIR=$(DISTDIR) \
+	DIST=$(DISTDIR) \
+	BUILD_OPT=1 \
+	NS_USE_GCC=1 \
+	NSS_USE_SYSTEM_SQLITE=1 \
+	USE_64=@USE_64@ \
+	NSS_ENABLE_ECC=1
+
+all:
+	$(MAKE) -C mozilla/security/nss \
+		build_coreconf \
+		build_dbm \
+		all \
+		$(ARGS)
+
+clean:
+	$(MAKE) -C mozilla/security/nss clean
+
+install:
+	install -d -m 755 $(DESTDIR)bin
+	install -d -m 755 $(DESTDIR)$(libdir)/nss
+	install -d -m 755 $(DESTDIR)$(prefix)/include/nss
+	install -d -m 755 $(DESTDIR)$(libdir)/pkgconfig
+
+	install -m 644 -t $(DESTDIR)$(libdir) $(DISTDIR)/lib/*.so
+	install -m 644 -t $(DESTDIR)$(libdir)/nss \
+	  $(DISTDIR)/lib/libfreebl3.so \
+	  $(DISTDIR)/lib/libsoftokn3.so \
+	  $(DISTDIR)/lib/libnssdbm3.so \
+	  $(DISTDIR)/lib/libnssckbi.so
+	install -m 644 -t $(DESTDIR)$(prefix)/include/nss $(DISTDIR)/public/nss/*
+	install -m 644 -t $(DESTDIR)$(libdir)/pkgconfig nss.pc 
+
