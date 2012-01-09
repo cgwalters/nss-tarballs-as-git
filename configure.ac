@@ -3,6 +3,9 @@ AC_INIT([nss], [3.12])
 
 AC_CONFIG_SRCDIR([mozilla/security/nss/Makefile])
 
+dnl http://people.gnome.org/~walters/docs/build-api.txt
+echo \#buildapi-variable-no-builddir >/dev/null
+
 NSPR_PREFIX=$(pkg-config nspr --variable=prefix)
 AC_SUBST(NSPR_PREFIX)
 NSPR_LIBDIR=$(pkg-config nspr --variable=libdir)
