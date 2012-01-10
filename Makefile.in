@@ -3,6 +3,9 @@ nspr_prefix=@NSPR_PREFIX@
 nspr_libdir=@NSPR_LIBDIR@
 libdir=@libdir@
 
+# http://people.gnome.org/~walters/docs/build-api.txt
+.NOTPARALLEL:
+
 DISTDIR = $(CURDIR)/mozilla/dist
 
 ARGS = \
