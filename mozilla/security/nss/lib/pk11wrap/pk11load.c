@@ -139,9 +139,9 @@ secmod_handleReload(SECMODModule *oldModule, SECMODModule *newModule)
     char *newModuleSpec;
     char **children;
     CK_SLOT_ID *ids;
-    SECStatus rv;
-    SECMODConfigList *conflist;
-    int count = 0;
+    SECMODConfigList *conflist = NULL;
+    SECStatus         rv       = SECFailure;
+    int               count    = 0;
 
     /* first look for tokens= key words from the module spec */
     modulespec = newModule->libraryParams;
@@ -178,8 +178,8 @@ secmod_handleReload(SECMODModule *oldModule, SECMODModule *newModule)
 	char *oldModuleSpec;
 
 	if (secmod_IsInternalKeySlot(newModule)) {
-	    pk11_SetInternalKeySlot(slot);
-	}
+	    pk11_SetInternalKeySlotIfFirst(slot);
+	} 
 	newID = slot->slotID;
 	PK11_FreeSlot(slot);
 	for (thisChild=children, thisID=ids; thisChild && *thisChild; 
@@ -387,7 +387,6 @@ SECStatus
 secmod_LoadPKCS11Module(SECMODModule *mod, SECMODModule **oldModule) {
     PRLibrary *library = NULL;
     CK_C_GetFunctionList entry = NULL;
-    char * full_name;
     CK_INFO info;
     CK_ULONG slotCount = 0;
     SECStatus rv;
@@ -406,7 +405,7 @@ secmod_LoadPKCS11Module(SECMODModule *mod, SECMODModule **oldModule) {
         PR_SUCCESS != PR_CallOnce(&loadSoftokenOnce, &softoken_LoadDSO))
         return SECFailure;
 
-    PR_AtomicIncrement(&softokenLoadCount);
+    PR_ATOMIC_INCREMENT(&softokenLoadCount);
 
     if (mod->isFIPS) {
         entry = (CK_C_GetFunctionList) 
@@ -434,14 +433,11 @@ secmod_LoadPKCS11Module(SECMODModule *mod, SECMODModule **oldModule) {
 	    return SECFailure;
 	}
 
-	full_name = PORT_Strdup(mod->dllName);
-
 	/* load the library. If this succeeds, then we have to remember to
 	 * unload the library if anything goes wrong from here on out...
 	 */
-	library = PR_LoadLibrary(full_name);
+	library = PR_LoadLibrary(mod->dllName);
 	mod->library = (void *)library;
-	PORT_Free(full_name);
 
 	if (library == NULL) {
 	    return SECFailure;
@@ -550,6 +546,11 @@ secmod_LoadPKCS11Module(SECMODModule *mod, SECMODModule **oldModule) {
 	    /* look down the slot info table */
 	    PK11_LoadSlotList(mod->slots[i],mod->slotInfo,mod->slotInfoCount);
 	    SECMOD_SetRootCerts(mod->slots[i],mod);
+	    /* explicitly mark the internal slot as such if IsInternalKeySlot()
+	     * is set */
+	    if (secmod_IsInternalKeySlot(mod) && (i == (mod->isFIPS ? 0 : 1))) {
+		pk11_SetInternalKeySlotIfFirst(mod->slots[i]);
+	    } 
 	}
 	mod->slotCount = slotCount;
 	mod->slotInfoCount = 0;
@@ -591,8 +592,8 @@ SECMOD_UnloadModule(SECMODModule *mod) {
     /* do we want the semantics to allow unloading the internal library?
      * if not, we should change this to SECFailure and move it above the
      * mod->loaded = PR_FALSE; */
-    if (mod->internal) {
-        if (0 == PR_AtomicDecrement(&softokenLoadCount)) {
+    if (mod->internal && (mod->dllName == NULL)) {
+        if (0 == PR_ATOMIC_DECREMENT(&softokenLoadCount)) {
           if (softokenLib) {
               disableUnload = PR_GetEnv("NSS_DISABLE_UNLOAD");
               if (!disableUnload) {

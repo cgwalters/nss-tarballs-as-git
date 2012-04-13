@@ -735,8 +735,8 @@ logger(void *arg)
          */
         PR_Sleep(logPeriodTicks);
         secondsElapsed++;
-        totalPeriodBytes +=  PR_AtomicSet(&loggerBytes, 0);
-        totalPeriodBytesTCP += PR_AtomicSet(&loggerBytesTCP, 0);
+        totalPeriodBytes +=  PR_ATOMIC_SET(&loggerBytes, 0);
+        totalPeriodBytesTCP += PR_ATOMIC_SET(&loggerBytesTCP, 0);
         if (secondsElapsed != logPeriod) {
             continue;
         }
@@ -803,6 +803,8 @@ PRBool enableSessionTickets = PR_FALSE;
 PRBool enableCompression    = PR_FALSE;
 PRBool failedToNegotiateName  = PR_FALSE;
 static char  *virtServerNameArray[MAX_VIRT_SERVER_NAME_ARRAY_INDEX];
+static int                  virtServerNameIndex = 1;
+
 
 static const char stopCmd[] = { "GET /stop " };
 static const char getCmd[]  = { "GET " };
@@ -1349,8 +1351,8 @@ handle_connection(
         /* Send testBulkTotal chunks to the client. Unlimited if 0. */
         if (testBulk) {
             while (0 < (rv = PR_Write(ssl_sock, testBulkBuf, testBulkSize))) {
-                PR_AtomicAdd(&loggerBytes, rv);
-                PR_AtomicIncrement(&bulkSentChunks);
+                PR_ATOMIC_ADD(&loggerBytes, rv);
+                PR_ATOMIC_INCREMENT(&bulkSentChunks);
                 if ((bulkSentChunks > testBulkTotal) && (testBulkTotal != 0))
                     break;
             }
@@ -1359,7 +1361,7 @@ handle_connection(
             if (bulkSentChunks <= testBulkTotal) {
                 errWarn("PR_Write");
             }
-            PR_AtomicDecrement(&loggerOps);
+            PR_ATOMIC_DECREMENT(&loggerOps);
             break;
         }
     } while (0);
@@ -1444,7 +1446,7 @@ do_accepts(
         VLOG(("selfserv: do_accept: Got connection\n"));
 
         if (logStats) {
-            PR_AtomicIncrement(&loggerOps);
+            PR_ATOMIC_INCREMENT(&loggerOps);
         }
 
 	PZ_Lock(qLock);
@@ -1558,7 +1560,7 @@ logWritev (
         timeout);
     /* Add the amount written, but not if there's an error */
     if (rv > 0) 
-        PR_AtomicAdd(&loggerBytesTCP, rv);
+        PR_ATOMIC_ADD(&loggerBytesTCP, rv);
     return rv;
 }
     
@@ -1571,7 +1573,7 @@ logWrite (
     PRInt32 rv = (fd->lower->methods->write)(fd->lower, buf, amount);
     /* Add the amount written, but not if there's an error */
     if (rv > 0) 
-        PR_AtomicAdd(&loggerBytesTCP, rv);
+        PR_ATOMIC_ADD(&loggerBytesTCP, rv);
     
     return rv;
 }
@@ -1588,7 +1590,7 @@ logSend (
         flags, timeout);
     /* Add the amount written, but not if there's an error */
     if (rv > 0) 
-        PR_AtomicAdd(&loggerBytesTCP, rv);
+        PR_ATOMIC_ADD(&loggerBytesTCP, rv);
     return rv;
 }
  
@@ -1706,10 +1708,12 @@ server_main(
 	}
     }
 
-    rv = SSL_SNISocketConfigHook(model_sock, mySSLSNISocketConfig,
-                                 (void*)&virtServerNameArray);
-    if (rv != SECSuccess) {
-        errExit("error enabling SNI extension ");
+    if (virtServerNameIndex >1) {
+        rv = SSL_SNISocketConfigHook(model_sock, mySSLSNISocketConfig,
+                                     (void*)&virtServerNameArray);
+        if (rv != SECSuccess) {
+            errExit("error enabling SNI extension ");
+        }
     }
 
     for (kea = kt_rsa; kea < kt_kea_size; kea++) {
@@ -1935,7 +1939,6 @@ main(int argc, char **argv)
     SSL3Statistics      *ssl3stats;
     PRUint32             i;
     secuPWData  pwdata = { PW_NONE, 0 };
-    int                  virtServerNameIndex = 1;
     char                *expectedHostNameVal = NULL;
 
     tmp = strrchr(argv[0], '/');

@@ -225,9 +225,6 @@ typedef struct {
 const SECCertUsageToEku certUsageEkuStringMap[] = {
     {certUsageSSLClient,             ekuIndexSSLClient},
     {certUsageSSLServer,             ekuIndexSSLServer},
-    {certUsageSSLServerWithStepUp,   ekuIndexSSLServer}, /* need to add oids to
-                                                          * the list of eku.
-                                                          * see 390381*/
     {certUsageSSLCA,                 ekuIndexSSLServer},
     {certUsageEmailSigner,           ekuIndexEmail},
     {certUsageEmailRecipient,        ekuIndexEmail},
@@ -238,8 +235,6 @@ const SECCertUsageToEku certUsageEkuStringMap[] = {
     {certUsageStatusResponder,       ekuIndexStatusResponder},
     {certUsageAnyCA,                 ekuIndexUnknown},
 };
-
-#define CERT_USAGE_EKU_STRING_MAPS_TOTAL       12
 
 /*
  * FUNCTION: cert_NssCertificateUsageToPkixKUAndEKU
@@ -292,7 +287,7 @@ cert_NssCertificateUsageToPkixKUAndEKU(
         PKIX_List_Create(&ekuOidsList, plContext),
         PKIX_LISTCREATEFAILED);
 
-    for (;i < CERT_USAGE_EKU_STRING_MAPS_TOTAL;i++) {
+    for (;i < PR_ARRAY_SIZE(certUsageEkuStringMap);i++) {
         const SECCertUsageToEku *usageToEkuElem =
             &certUsageEkuStringMap[i];
         if (usageToEkuElem->certUsage == requiredCertUsage) {
@@ -864,7 +859,7 @@ cert_PkixErrorToNssCode(
     void *plContext)
 {
     int errLevel = 0;
-    PKIX_UInt32 nssErr = 0;
+    PKIX_Int32 nssErr = 0;
     PKIX_Error *errPtr = error;
 
     PKIX_ENTER(CERTVFYPKIX, "cert_PkixErrorToNssCode");
@@ -1224,7 +1219,7 @@ cert_VerifyCertChainPkix(
     runningLeakTest = PKIX_TRUE;
 
     /* Prevent multi-threaded run of object leak test */
-    fnInvLocalCount = PR_AtomicIncrement(&parallelFnInvocationCount);
+    fnInvLocalCount = PR_ATOMIC_INCREMENT(&parallelFnInvocationCount);
     PORT_Assert(fnInvLocalCount == 1);
 
 do {
@@ -1327,7 +1322,7 @@ cleanup:
 } while (errorGenerated);
 
     runningLeakTest = PKIX_FALSE; 
-    PR_AtomicDecrement(&parallelFnInvocationCount);
+    PR_ATOMIC_DECREMENT(&parallelFnInvocationCount);
     usePKIXValidationEngine = savedUsePkixEngFlag;
 #endif /* PKIX_OBJECT_LEAK_TEST */
 
@@ -1431,8 +1426,8 @@ struct fake_PKIX_PL_CertStruct {
 /* This needs to be part of the PKIX_PL_* */
 /* This definitely needs to go away, and be replaced with
    a real accessor function in PKIX */
-CERTCertificate *
-cert_NSSCertFromPKIXCert(const PKIX_PL_Cert *pkix_cert, void *plContext)
+static CERTCertificate *
+cert_NSSCertFromPKIXCert(const PKIX_PL_Cert *pkix_cert)
 {
     struct fake_PKIX_PL_CertStruct *fcert = NULL;
 
@@ -1517,7 +1512,7 @@ setRevocationMethod(PKIX_RevocationChecker *revChecker,
     PKIX_Error *error = NULL;
     int priority = 0;
     
-    if (revTest->number_of_defined_methods < certRevMethod) {
+    if (revTest->number_of_defined_methods <= certRevMethod) {
         return NULL;
     }
     if (revTest->preferred_methods) {
@@ -1736,6 +1731,7 @@ cert_pkixSetParam(PKIX_ProcessingParams *procParams,
         default:
             PORT_SetError(errCode);
             r = SECFailure;
+            break;
     }
 
     if (policyOIDList != NULL)
@@ -1985,6 +1981,63 @@ CERT_GetPKIXVerifyNistRevocationPolicy()
     return &certRev_PKIX_Verify_Nist_Policy;
 }
 
+CERTRevocationFlags *
+CERT_AllocCERTRevocationFlags(
+    PRUint32 number_leaf_methods, PRUint32 number_leaf_pref_methods,
+    PRUint32 number_chain_methods, PRUint32 number_chain_pref_methods)
+{
+    CERTRevocationFlags *flags;
+    
+    flags = PORT_New(CERTRevocationFlags);
+    if (!flags)
+        return(NULL);
+    
+    flags->leafTests.number_of_defined_methods = number_leaf_methods;
+    flags->leafTests.cert_rev_flags_per_method = 
+        PORT_NewArray(PRUint64, number_leaf_methods);
+
+    flags->leafTests.number_of_preferred_methods = number_leaf_pref_methods;
+    flags->leafTests.preferred_methods = 
+        PORT_NewArray(CERTRevocationMethodIndex, number_leaf_pref_methods);
+
+    flags->chainTests.number_of_defined_methods = number_chain_methods;
+    flags->chainTests.cert_rev_flags_per_method = 
+        PORT_NewArray(PRUint64, number_chain_methods);
+
+    flags->chainTests.number_of_preferred_methods = number_chain_pref_methods;
+    flags->chainTests.preferred_methods = 
+        PORT_NewArray(CERTRevocationMethodIndex, number_chain_pref_methods);
+    
+    if (!flags->leafTests.cert_rev_flags_per_method
+        || !flags->leafTests.preferred_methods
+        || !flags->chainTests.cert_rev_flags_per_method
+        || !flags->chainTests.preferred_methods) {
+        CERT_DestroyCERTRevocationFlags(flags);
+        return (NULL);
+    }
+    
+    return flags;
+}
+
+void CERT_DestroyCERTRevocationFlags(CERTRevocationFlags *flags)
+{
+    if (!flags)
+	return;
+  
+    if (flags->leafTests.cert_rev_flags_per_method)
+        PORT_Free(flags->leafTests.cert_rev_flags_per_method);
+
+    if (flags->leafTests.preferred_methods)
+        PORT_Free(flags->leafTests.preferred_methods);
+    
+    if (flags->chainTests.cert_rev_flags_per_method)
+        PORT_Free(flags->chainTests.cert_rev_flags_per_method);
+
+    if (flags->chainTests.preferred_methods)
+        PORT_Free(flags->chainTests.preferred_methods);
+
+     PORT_Free(flags);
+}
 
 /*
  * CERT_PKIXVerifyCert
@@ -2059,7 +2112,7 @@ SECStatus CERT_PKIXVerifyCert(
     runningLeakTest = PKIX_TRUE;
 
     /* Prevent multi-threaded run of object leak test */
-    fnInvLocalCount = PR_AtomicIncrement(&parallelFnInvocationCount);
+    fnInvLocalCount = PR_ATOMIC_INCREMENT(&parallelFnInvocationCount);
     PORT_Assert(fnInvLocalCount == 1);
 
 do {
@@ -2164,10 +2217,12 @@ do {
         goto cleanup;
     }
 
-    error = PKIX_TrustAnchor_GetTrustedCert( trustAnchor, &trustAnchorCert,
-                                                plContext);
-    if (error != NULL) {
-        goto cleanup;
+    if (trustAnchor != NULL) {
+        error = PKIX_TrustAnchor_GetTrustedCert( trustAnchor, &trustAnchorCert,
+                                                 plContext);
+        if (error != NULL) {
+            goto cleanup;
+        }
     }
 
 #ifdef PKIX_OBJECT_LEAK_TEST
@@ -2178,8 +2233,12 @@ do {
 
     oparam = cert_pkix_FindOutputParam(paramsOut, cert_po_trustAnchor);
     if (oparam != NULL) {
-        oparam->value.pointer.cert = 
-                cert_NSSCertFromPKIXCert(trustAnchorCert,plContext);
+        if (trustAnchorCert != NULL) {
+            oparam->value.pointer.cert =
+                    cert_NSSCertFromPKIXCert(trustAnchorCert);
+        } else {
+            oparam->value.pointer.cert = NULL;
+        }
     }
 
     error = PKIX_BuildResult_GetCertChain( buildResult, &builtCertList,
@@ -2268,7 +2327,7 @@ cleanup:
 } while (errorGenerated);
 
     runningLeakTest = PKIX_FALSE; 
-    PR_AtomicDecrement(&parallelFnInvocationCount);
+    PR_ATOMIC_DECREMENT(&parallelFnInvocationCount);
     usePKIXValidationEngine = savedUsePkixEngFlag;
 #endif /* PKIX_OBJECT_LEAK_TEST */
 

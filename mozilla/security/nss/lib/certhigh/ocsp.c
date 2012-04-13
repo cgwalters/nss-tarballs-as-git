@@ -39,7 +39,7 @@
  * Implementation of OCSP services, for both client and server.
  * (XXX, really, mostly just for client right now, but intended to do both.)
  *
- * $Id: ocsp.c,v 1.64 2010/02/01 20:09:31 wtc%google.com Exp $
+ * $Id: ocsp.c,v 1.69 2012/03/14 22:26:53 wtc%google.com Exp $
  */
 
 #include "prerror.h"
@@ -296,7 +296,7 @@ SECStatus
 SEC_RegisterDefaultHttpClient(const SEC_HttpClientFcn *fcnTable)
 {
     if (!OCSP_Global.monitor) {
-      PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+      PORT_SetError(SEC_ERROR_NOT_INITIALIZED);
       return SECFailure;
     }
     
@@ -315,7 +315,7 @@ CERT_RegisterAlternateOCSPAIAInfoCallBack(
     CERT_StringFromCertFcn old;
 
     if (!OCSP_Global.monitor) {
-      PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+      PORT_SetError(SEC_ERROR_NOT_INITIALIZED);
       return SECFailure;
     }
 
@@ -612,10 +612,14 @@ ocsp_CheckCacheSize(OCSPCacheData *cache)
 {
     OCSP_TRACE(("OCSP ocsp_CheckCacheSize\n"));
     PR_EnterMonitor(OCSP_Global.monitor);
-    if (OCSP_Global.maxCacheEntries <= 0) /* disabled or unlimited */
-        return;
-    while (cache->numberOfEntries > OCSP_Global.maxCacheEntries) {
-        ocsp_RemoveCacheItem(cache, cache->LRUitem);
+    if (OCSP_Global.maxCacheEntries > 0) {
+        /* Cache is not disabled. Number of cache entries is limited.
+         * The monitor ensures that maxCacheEntries remains positive.
+         */
+        while (cache->numberOfEntries > 
+                     (PRUint32)OCSP_Global.maxCacheEntries) {
+            ocsp_RemoveCacheItem(cache, cache->LRUitem);
+        }
     }
     PR_ExitMonitor(OCSP_Global.monitor);
 }
@@ -987,7 +991,7 @@ const SEC_HttpClientFcn *SEC_GetRegisteredHttpClient()
     const SEC_HttpClientFcn *retval;
 
     if (!OCSP_Global.monitor) {
-      PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+      PORT_SetError(SEC_ERROR_NOT_INITIALIZED);
       return NULL;
     }
 
@@ -2696,10 +2700,10 @@ ocsp_GetResponseSignature(CERTOCSPResponse *response)
     if (NULL == response->responseBytes) {
         return NULL;
     }
-    PORT_Assert(response->responseBytes != NULL);
-    PORT_Assert(response->responseBytes->responseTypeTag
-		== SEC_OID_PKIX_OCSP_BASIC_RESPONSE);
-
+    if (response->responseBytes->responseTypeTag
+        != SEC_OID_PKIX_OCSP_BASIC_RESPONSE) {
+        return NULL;
+    }
     basic = response->responseBytes->decodedResponse.basic;
     PORT_Assert(basic != NULL);
 
@@ -2946,6 +2950,7 @@ ocsp_SendEncodedRequest(char *location, SECItem *encodedRequest)
     PRFileDesc *sock = NULL;
     PRFileDesc *returnSock = NULL;
     char *header = NULL;
+    char portstr[16];
 
     /*
      * Take apart the location, getting the hostname, port, and path.
@@ -2961,11 +2966,16 @@ ocsp_SendEncodedRequest(char *location, SECItem *encodedRequest)
     if (sock == NULL)
 	goto loser;
 
+    portstr[0] = '\0';
+    if (port != 80) {
+        PR_snprintf(portstr, sizeof(portstr), ":%d", port);
+    }
+
     header = PR_smprintf("POST %s HTTP/1.0\r\n"
-			 "Host: %s:%d\r\n"
+			 "Host: %s%s\r\n"
 			 "Content-Type: application/ocsp-request\r\n"
 			 "Content-Length: %u\r\n\r\n",
-			 path, hostname, port, encodedRequest->len);
+			 path, hostname, portstr, encodedRequest->len);
     if (header == NULL)
 	goto loser;
 
@@ -5189,7 +5199,7 @@ cert_ProcessOCSPResponse(CERTCertDBHandle *handle,
                          SECStatus        *cacheUpdateStatus)
 {
     SECStatus rv;
-    SECStatus rv_cache;
+    SECStatus rv_cache = SECSuccess;
     CERTOCSPSingleResponse *single = NULL;
 
     rv = ocsp_GetVerifiedSingleResponseForCertID(handle, response, certID, 

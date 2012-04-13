@@ -52,12 +52,6 @@
 #include "secerr.h"
 #include "hasht.h"
 
-/* forward static declarations. */
-static PK11SymKey *pk11_DeriveWithTemplate(PK11SymKey *baseKey, 
-	CK_MECHANISM_TYPE derive, SECItem *param, CK_MECHANISM_TYPE target, 
-	CK_ATTRIBUTE_TYPE operation, int keySize, CK_ATTRIBUTE *userAttr, 
-	unsigned int numAttrs, PRBool isPerm);
-
 static void
 pk11_EnterKeyMonitor(PK11SymKey *symKey) {
     if (!symKey->sessionOwner || !(symKey->slot->isThreadSafe)) 
@@ -217,7 +211,7 @@ PK11_FreeSymKey(PK11SymKey *symKey)
     PK11SlotInfo *slot;
     PRBool freeit = PR_TRUE;
 
-    if (PR_AtomicDecrement(&symKey->refCount) == 0) {
+    if (PR_ATOMIC_DECREMENT(&symKey->refCount) == 0) {
 	PK11SymKey *parent = symKey->parent;
 
 	symKey->parent = NULL;
@@ -279,7 +273,7 @@ PK11_FreeSymKey(PK11SymKey *symKey)
 PK11SymKey *
 PK11_ReferenceSymKey(PK11SymKey *symKey)
 {
-    PR_AtomicIncrement(&symKey->refCount);
+    PR_ATOMIC_INCREMENT(&symKey->refCount);
     return symKey;
 }
 
@@ -898,11 +892,11 @@ PK11_MoveSymKey(PK11SlotInfo *slot, CK_ATTRIBUTE_TYPE operation,
  *  for the key. Most PKCS #11 modules fail if you specify the CKA_VALUE_LEN 
  *  attribute for keys with fixed length. The exception is DES2. If you
  *  select a CKM_DES3_CBC mechanism, this code will not add the CKA_VALUE_LEN
- *  paramter and use the key size to determine which underlying DES keygen
+ *  parameter and use the key size to determine which underlying DES keygen
  *  function to use (CKM_DES2_KEY_GEN or CKM_DES3_KEY_GEN).
  *
  * keyType must be -1 for most algorithms. Some PBE algorthims cannot 
- *  determine the correct key type from the mechanism or the paramters,
+ *  determine the correct key type from the mechanism or the parameters,
  *  so key type must be specified. Other PKCS #11 mechanisms may do so in
  *  the future. Currently there is no need to export this publically.
  *  Keep it private until there is a need in case we need to expand the
@@ -921,7 +915,7 @@ pk11_TokenKeyGenWithFlagsAndKeyType(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
     CK_ATTRIBUTE *attrs = genTemplate;
     int count = sizeof(genTemplate)/sizeof(genTemplate[0]);
     CK_SESSION_HANDLE session;
-    CK_MECHANISM mechanism;
+    CK_MECHANISM_TYPE keyGenType;
     CK_RV crv;
     CK_BBOOL cktrue = CK_TRUE;
     CK_BBOOL ckfalse = CK_FALSE;
@@ -957,76 +951,16 @@ pk11_TokenKeyGenWithFlagsAndKeyType(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
     count = attrs - genTemplate;
     PR_ASSERT(count <= sizeof(genTemplate)/sizeof(CK_ATTRIBUTE));
 
-    /* Initialize the Key Gen Mechanism */
-    mechanism.mechanism = PK11_GetKeyGenWithSize(type, keySize);
-    if (mechanism.mechanism == CKM_FAKE_RANDOM) {
-	PORT_SetError( SEC_ERROR_NO_MODULE );
-	return NULL;
+    keyGenType = PK11_GetKeyGenWithSize(type, keySize);
+    if (keyGenType == CKM_FAKE_RANDOM) {
+        PORT_SetError( SEC_ERROR_NO_MODULE );
+        return NULL;
     }
-
-    /* find a slot to generate the key into */
-    /* Only do slot management if this is not a token key */
-    if (!isToken && (slot == NULL || !PK11_DoesMechanism(slot,type))) {
-        PK11SlotInfo *bestSlot;
-
-        bestSlot = PK11_GetBestSlot(type,wincx);
-        if (bestSlot == NULL) {
-	    PORT_SetError( SEC_ERROR_NO_MODULE );
-	    return NULL;
-	}
-
-        symKey = pk11_CreateSymKey(bestSlot, type, !isToken, PR_TRUE, wincx);
-
-        PK11_FreeSlot(bestSlot);
-    } else {
-	symKey = pk11_CreateSymKey(slot, type, !isToken, PR_TRUE, wincx);
+    symKey = PK11_KeyGenWithTemplate(slot, type, keyGenType,
+                                     param, genTemplate, count, wincx);
+    if (symKey != NULL) {
+        symKey->size = keySize;
     }
-    if (symKey == NULL) return NULL;
-
-    symKey->size = keySize;
-    symKey->origin = PK11_OriginGenerated;
-
-    /* Set the parameters for the key gen if provided */
-    mechanism.pParameter = NULL;
-    mechanism.ulParameterLen = 0;
-    if (param) {
-	mechanism.pParameter = param->data;
-	mechanism.ulParameterLen = param->len;
-    }
-
-    /* Get session and perform locking */
-    if (isToken) {
-	PK11_Authenticate(symKey->slot,PR_TRUE,wincx);
-	/* Should always be original slot */
-        session = PK11_GetRWSession(symKey->slot);  
-	symKey->owner = PR_FALSE;
-    } else {
-        session = symKey->session;
-	if (session != CK_INVALID_SESSION) 
-	    pk11_EnterKeyMonitor(symKey);
-    }
-    if (session == CK_INVALID_SESSION) {
-	PK11_FreeSymKey(symKey);
-	PORT_SetError(SEC_ERROR_BAD_DATA);
-	return NULL;
-    }
-
-    crv = PK11_GETTAB(symKey->slot)->C_GenerateKey(session,
-			 &mechanism, genTemplate, count, &symKey->objectID);
-
-    /* Release lock and session */
-    if (isToken) {
-        PK11_RestoreROSession(symKey->slot, session);
-    } else {
-        pk11_ExitKeyMonitor(symKey);
-    }
-
-    if (crv != CKR_OK) {
-	PK11_FreeSymKey(symKey);
-	PORT_SetError( PK11_MapError(crv) );
-	return NULL;
-    }
-
     return symKey;
 }
 
@@ -1038,7 +972,7 @@ pk11_TokenKeyGenWithFlagsAndKeyType(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
  *  for the key. Most PKCS #11 modules fail if you specify the CKA_VALUE_LEN 
  *  attribute for keys with fixed length. The exception is DES2. If you
  *  select a CKM_DES3_CBC mechanism, this code will not add the CKA_VALUE_LEN
- *  paramter and use the key size to determine which underlying DES keygen
+ *  parameter and use the key size to determine which underlying DES keygen
  *  function to use (CKM_DES2_KEY_GEN or CKM_DES3_KEY_GEN).
  *
  * CK_FLAGS flags: key operation flags
@@ -1098,6 +1032,107 @@ PK11_KeyGen(PK11SlotInfo *slot, CK_MECHANISM_TYPE type, SECItem *param,
     return PK11_TokenKeyGen(slot, type, param, keySize, 0, PR_FALSE, wincx);
 }
 
+PK11SymKey *
+PK11_KeyGenWithTemplate(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
+                        CK_MECHANISM_TYPE keyGenType,
+                        SECItem *param, CK_ATTRIBUTE * attrs,
+                        unsigned int attrsCount, void *wincx)
+{
+    PK11SymKey *symKey;
+    CK_SESSION_HANDLE session;
+    CK_MECHANISM mechanism;
+    CK_RV crv;
+    PRBool isToken = CK_FALSE;
+    CK_ULONG keySize = 0;
+    unsigned i;
+
+    /* Extract the template's CKA_VALUE_LEN into keySize and CKA_TOKEN into
+       isToken. */
+    for (i = 0; i < attrsCount; ++i) {
+        switch (attrs[i].type) {
+            case CKA_VALUE_LEN:
+                if (attrs[i].pValue == NULL ||
+                    attrs[i].ulValueLen != sizeof(CK_ULONG)) {
+                    PORT_SetError(PK11_MapError(CKR_TEMPLATE_INCONSISTENT));
+                    return NULL;
+                }
+                keySize = * (CK_ULONG *) attrs[i].pValue;
+                break;
+            case CKA_TOKEN:
+                if (attrs[i].pValue == NULL || 
+                    attrs[i].ulValueLen != sizeof(CK_BBOOL)) {
+                    PORT_SetError(PK11_MapError(CKR_TEMPLATE_INCONSISTENT));
+                    return NULL;
+                }
+                isToken = (*(CK_BBOOL*)attrs[i].pValue) ? PR_TRUE : PR_FALSE;
+                break;
+        }
+    }
+
+    /* find a slot to generate the key into */
+    /* Only do slot management if this is not a token key */
+    if (!isToken && (slot == NULL || !PK11_DoesMechanism(slot,type))) {
+        PK11SlotInfo *bestSlot = PK11_GetBestSlot(type,wincx);
+        if (bestSlot == NULL) {
+            PORT_SetError( SEC_ERROR_NO_MODULE );
+            return NULL;
+        }
+        symKey = pk11_CreateSymKey(bestSlot, type, !isToken, PR_TRUE, wincx);
+        PK11_FreeSlot(bestSlot);
+    } else {
+        symKey = pk11_CreateSymKey(slot, type, !isToken, PR_TRUE, wincx);
+    }
+    if (symKey == NULL) return NULL;
+
+    symKey->size = keySize;
+    symKey->origin = PK11_OriginGenerated;
+
+    /* Set the parameters for the key gen if provided */
+    mechanism.mechanism = keyGenType;
+    mechanism.pParameter = NULL;
+    mechanism.ulParameterLen = 0;
+    if (param) {
+        mechanism.pParameter = param->data;
+        mechanism.ulParameterLen = param->len;
+    }
+
+    /* Get session and perform locking */
+    if (isToken) {
+        PK11_Authenticate(symKey->slot,PR_TRUE,wincx);
+        /* Should always be original slot */
+        session = PK11_GetRWSession(symKey->slot);  
+        symKey->owner = PR_FALSE;
+    } else {
+        session = symKey->session;
+        if (session != CK_INVALID_SESSION) 
+            pk11_EnterKeyMonitor(symKey);
+    }
+    if (session == CK_INVALID_SESSION) {
+        PK11_FreeSymKey(symKey);
+        PORT_SetError(SEC_ERROR_BAD_DATA);
+        return NULL;
+    }
+
+    crv = PK11_GETTAB(symKey->slot)->C_GenerateKey(session,
+			 &mechanism, attrs, attrsCount, &symKey->objectID);
+
+    /* Release lock and session */
+    if (isToken) {
+        PK11_RestoreROSession(symKey->slot, session);
+    } else {
+        pk11_ExitKeyMonitor(symKey);
+    }
+
+    if (crv != CKR_OK) {
+        PK11_FreeSymKey(symKey);
+        PORT_SetError( PK11_MapError(crv) );
+        return NULL;
+    }
+
+    return symKey;
+}
+
+
 /* --- */
 PK11SymKey *
 PK11_GenDES3TokenKey(PK11SlotInfo *slot, SECItem *keyid, void *cx)
@@ -1154,13 +1189,18 @@ PK11_PubWrapSymKey(CK_MECHANISM_TYPE type, SECKEYPublicKey *pubKey,
     CK_SESSION_HANDLE session;
     CK_RV crv;
 
+    if (symKey == NULL) {
+	PORT_SetError( SEC_ERROR_INVALID_ARGS );
+	return SECFailure;
+    }
+
     /* if this slot doesn't support the mechanism, go to a slot that does */
     newKey = pk11_ForceSlot(symKey,type,CKA_ENCRYPT);
     if (newKey != NULL) {
 	symKey = newKey;
     }
 
-    if ((symKey == NULL) || (symKey->slot == NULL)) {
+    if (symKey->slot == NULL) {
 	PORT_SetError( SEC_ERROR_NO_MODULE );
 	return SECFailure;
     }
@@ -1363,7 +1403,7 @@ PK11_Derive( PK11SymKey *baseKey, CK_MECHANISM_TYPE derive, SECItem *param,
              CK_MECHANISM_TYPE target, CK_ATTRIBUTE_TYPE operation,
 	     int keySize)
 {
-    return pk11_DeriveWithTemplate(baseKey, derive, param, target, operation, 
+    return PK11_DeriveWithTemplate(baseKey, derive, param, target, operation, 
 				   keySize, NULL, 0, PR_FALSE);
 }
 
@@ -1378,7 +1418,7 @@ PK11_DeriveWithFlags( PK11SymKey *baseKey, CK_MECHANISM_TYPE derive,
     unsigned int    templateCount;
 
     templateCount = pk11_OpFlagsToAttributes(flags, keyTemplate, &ckTrue);
-    return pk11_DeriveWithTemplate(baseKey, derive, param, target, operation, 
+    return PK11_DeriveWithTemplate(baseKey, derive, param, target, operation, 
 		  keySize, keyTemplate, templateCount, PR_FALSE);
 }
 
@@ -1398,12 +1438,12 @@ PK11_DeriveWithFlagsPerm( PK11SymKey *baseKey, CK_MECHANISM_TYPE derive,
     }
     templateCount = attrs - keyTemplate;
     templateCount += pk11_OpFlagsToAttributes(flags, attrs, &cktrue);
-    return pk11_DeriveWithTemplate(baseKey, derive, param, target, operation, 
+    return PK11_DeriveWithTemplate(baseKey, derive, param, target, operation, 
 				   keySize, keyTemplate, templateCount, isPerm);
 }
 
-static PK11SymKey *
-pk11_DeriveWithTemplate( PK11SymKey *baseKey, CK_MECHANISM_TYPE derive, 
+PK11SymKey *
+PK11_DeriveWithTemplate( PK11SymKey *baseKey, CK_MECHANISM_TYPE derive, 
 	SECItem *param, CK_MECHANISM_TYPE target, CK_ATTRIBUTE_TYPE operation, 
 	int keySize, CK_ATTRIBUTE *userAttr, unsigned int numAttrs,
 							 PRBool isPerm)
@@ -1417,7 +1457,9 @@ pk11_DeriveWithTemplate( PK11SymKey *baseKey, CK_MECHANISM_TYPE derive,
     CK_ULONG        valueLen	= 0;
     CK_MECHANISM    mechanism; 
     CK_RV           crv;
-    CK_ATTRIBUTE    keyTemplate[MAX_TEMPL_ATTRS];
+#define MAX_ADD_ATTRS 4
+    CK_ATTRIBUTE    keyTemplate[MAX_TEMPL_ATTRS + MAX_ADD_ATTRS];
+#undef MAX_ADD_ATTRS
     CK_ATTRIBUTE *  attrs	= keyTemplate;
     CK_SESSION_HANDLE session;
     unsigned int    templateCount;
@@ -1426,6 +1468,7 @@ pk11_DeriveWithTemplate( PK11SymKey *baseKey, CK_MECHANISM_TYPE derive,
     	PORT_SetError(SEC_ERROR_INVALID_ARGS);
 	return NULL;
     }
+
     /* first copy caller attributes in. */
     for (templateCount = 0; templateCount < numAttrs; ++templateCount) {
     	*attrs++ = *userAttr++;
@@ -1455,7 +1498,7 @@ pk11_DeriveWithTemplate( PK11SymKey *baseKey, CK_MECHANISM_TYPE derive,
     }
 
     templateCount = attrs - keyTemplate;
-    PR_ASSERT(templateCount <= MAX_TEMPL_ATTRS);
+    PR_ASSERT(templateCount <= sizeof(keyTemplate)/sizeof(CK_ATTRIBUTE));
 
     /* move the key to a slot that can do the function */
     if (!PK11_DoesMechanism(slot,derive)) {
@@ -1984,7 +2027,9 @@ pk11_AnyUnwrapKey(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
     CK_SESSION_HANDLE rwsession;
     CK_RV           crv;
     CK_MECHANISM_INFO mechanism_info;
-    CK_ATTRIBUTE    keyTemplate[MAX_TEMPL_ATTRS];
+#define MAX_ADD_ATTRS 4
+    CK_ATTRIBUTE    keyTemplate[MAX_TEMPL_ATTRS + MAX_ADD_ATTRS];
+#undef MAX_ADD_ATTRS
     CK_ATTRIBUTE *  attrs	= keyTemplate;
     unsigned int    templateCount;
 
@@ -1992,6 +2037,7 @@ pk11_AnyUnwrapKey(PK11SlotInfo *slot, CK_OBJECT_HANDLE wrappingKey,
     	PORT_SetError(SEC_ERROR_INVALID_ARGS);
 	return NULL;
     }
+
     /* first copy caller attributes in. */
     for (templateCount = 0; templateCount < numAttrs; ++templateCount) {
     	*attrs++ = *userAttr++;

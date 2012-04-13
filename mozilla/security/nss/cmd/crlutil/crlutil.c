@@ -248,7 +248,8 @@ static SECStatus DeleteCRL (CERTCertDBHandle *certHandle, char *name, int type)
 }
 
 SECStatus ImportCRL (CERTCertDBHandle *certHandle, char *url, int type, 
-                     PRFileDesc *inFile, PRInt32 importOptions, PRInt32 decodeOptions)
+                     PRFileDesc *inFile, PRInt32 importOptions, PRInt32 decodeOptions,
+                     secuPWData *pwdata)
 {
     CERTSignedCrl *crl = NULL;
     SECItem crlDER;
@@ -272,6 +273,12 @@ SECStatus ImportCRL (CERTCertDBHandle *certHandle, char *url, int type,
     decodeOptions |= CRL_DECODE_DONT_COPY_DER;
 
     slot = PK11_GetInternalKeySlot();
+
+    if (PK11_NeedLogin(slot)) {
+	rv = PK11_Authenticate(slot, PR_TRUE, pwdata);
+    if (rv != SECSuccess)
+	goto loser;
+    }
  
 #if defined(DEBUG_jp96085)
     starttime = PR_IntervalNow();
@@ -299,12 +306,44 @@ SECStatus ImportCRL (CERTCertDBHandle *certHandle, char *url, int type,
     } else {
 	SEC_DestroyCrl (crl);
     }
+  loser:
     if (slot) {
         PK11_FreeSlot(slot);
     }
     return (rv);
 }
 
+SECStatus DumpCRL(PRFileDesc *inFile)
+{
+    int rv;
+    PRArenaPool *arena = NULL;
+    CERTSignedCrl *newCrl = NULL;
+    
+    SECItem crlDER;
+    crlDER.data = NULL;
+
+    /* Read in the entire file specified with the -f argument */
+    rv = SECU_ReadDERFromFile(&crlDER, inFile, PR_FALSE);
+    if (rv != SECSuccess) {
+	SECU_PrintError(progName, "unable to read input file");
+	return (SECFailure);
+    }
+    
+    rv = SEC_ERROR_NO_MEMORY;
+    arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
+    if (!arena)
+    	return rv;
+
+    newCrl = CERT_DecodeDERCrlWithFlags(arena, &crlDER, SEC_CRL_TYPE,
+					CRL_DECODE_DEFAULT_OPTIONS);
+    if (!newCrl)
+    	return SECFailure;
+    
+    SECU_PrintCRLInfo (stdout, &newCrl->crl, "CRL file contents", 0);
+    
+    PORT_FreeArena (arena, PR_FALSE);
+    return rv;
+}
 
 static CERTCertificate*
 FindSigningCert(CERTCertDBHandle *certHandle, CERTSignedCrl *signCrl,
@@ -562,7 +601,7 @@ UpdateCrl(CERTSignedCrl *signCrl, PRFileDesc *inCrlInitFile)
      * up memory that was used for CRL generation. Should be called regardless
      * of previouse call status, but only after initialization of
      * crlGenData was done. It will commit all changes that was done before
-     * an error has occured.
+     * an error has occurred.
      */
     if (SECSuccess != CRLGEN_CommitExtensionsAndEntries(crlGenData)) {
         SECU_PrintError(progName, "crl generation failed");
@@ -748,6 +787,7 @@ static void Usage(char *progName)
     fprintf(stderr,
 	    "Usage:  %s -L [-n nickname] [-d keydir] [-P dbprefix] [-t crlType]\n"
 	    "        %s -D -n nickname [-d keydir] [-P dbprefix]\n"
+	    "        %s -S -i crl\n"
 	    "        %s -I -i crl -t crlType [-u url] [-d keydir] [-P dbprefix] [-B] "
             "[-p pwd-file] -w [pwd-string]\n"
 	    "        %s -E -t crlType [-d keydir] [-P dbprefix]\n"
@@ -755,7 +795,7 @@ static void Usage(char *progName)
 	    "        %s -G|-M -c crl-init-file -n nickname [-i crl] [-u url] "
             "[-d keydir] [-P dbprefix] [-Z alg] ] [-p pwd-file] -w [pwd-string] "
             "[-a] [-B]\n",
-	    progName, progName, progName, progName, progName, progName);
+	    progName, progName, progName, progName, progName, progName, progName);
 
     fprintf (stderr, "%-15s List CRL\n", "-L");
     fprintf(stderr, "%-20s Specify the nickname of the CA certificate\n",
@@ -780,6 +820,10 @@ static void Usage(char *progName)
 	    "-d keydir");
     fprintf(stderr, "%-20s Cert & Key database prefix (default is \"\")\n",
 	    "-P dbprefix");
+    
+    fprintf (stderr, "%-15s Show contents of a CRL file (without database)\n", "-S");
+    fprintf(stderr, "%-20s Specify the file which contains the CRL to show\n",
+	    "-i crl");
 
     fprintf (stderr, "%-15s Import a CRL to the cert database\n", "-I");    
     fprintf(stderr, "%-20s Specify the file which contains the CRL to import\n",
@@ -827,15 +871,14 @@ static void Usage(char *progName)
 
 int main(int argc, char **argv)
 {
-    SECItem privKeyDER;
     CERTCertDBHandle *certHandle;
-    FILE *certFile;
     PRFileDesc *inFile;
     PRFileDesc *inCrlInitFile = NULL;
     int generateCRL;
     int modifyCRL;
     int listCRL;
     int importCRL;
+    int showFileCRL;
     int deleteCRL;
     int rv;
     char *nickName;
@@ -864,17 +907,15 @@ int main(int argc, char **argv)
     progName = progName ? progName+1 : argv[0];
 
     rv = 0;
-    deleteCRL = importCRL = listCRL = generateCRL = modifyCRL = 0;
-    certFile = NULL;
+    deleteCRL = importCRL = listCRL = generateCRL = modifyCRL = showFileCRL = 0;
     inFile = NULL;
     nickName = url = NULL;
-    privKeyDER.data = NULL;
     certHandle = NULL;
     crlType = SEC_CRL_TYPE;
     /*
      * Parse command line arguments
      */
-    optstate = PL_CreateOptState(argc, argv, "sqBCDGILMTEP:f:d:i:h:n:p:t:u:r:aZ:o:c:");
+    optstate = PL_CreateOptState(argc, argv, "sqBCDGILMSTEP:f:d:i:h:n:p:t:u:r:aZ:o:c:");
     while ((status = PL_GetNextOpt(optstate)) == PL_OPT_OK) {
 	switch (optstate->option) {
 	  case '?':
@@ -907,6 +948,10 @@ int main(int argc, char **argv)
 
 	  case 'I':
 	      importCRL = 1;
+	      break;
+	      
+	  case 'S':
+	      showFileCRL = 1;
 	      break;
 	           
 	  case 'C':
@@ -979,10 +1024,7 @@ int main(int argc, char **argv)
 	    break;
 	    
 	  case 't': {
-	    char *type;
-	    
-	    type = strdup(optstate->value);
-	    crlType = atoi (type);
+	    crlType = atoi(optstate->value);
 	    if (crlType != SEC_CRL_TYPE && crlType != SEC_KRL_TYPE) {
 		PR_fprintf(PR_STDERR, "%s: invalid crl type\n", progName);
 		PL_DestroyOptState(optstate);
@@ -1010,12 +1052,13 @@ int main(int argc, char **argv)
 
     if (deleteCRL && !nickName) Usage (progName);
     if (importCRL && !inFile) Usage (progName);
+    if (showFileCRL && !inFile) Usage (progName);
     if ((generateCRL && !nickName) ||
         (modifyCRL && !inFile && !nickName)) Usage (progName);
-    if (!(listCRL || deleteCRL || importCRL || generateCRL ||
+    if (!(listCRL || deleteCRL || importCRL || showFileCRL || generateCRL ||
 	  modifyCRL || test || erase)) Usage (progName);
 
-    if (listCRL) {
+    if (listCRL || showFileCRL) {
         readonly = PR_TRUE;
     }
     
@@ -1023,12 +1066,18 @@ int main(int argc, char **argv)
 
     PK11_SetPasswordFunc(SECU_GetModulePassword);
 
-    secstatus = NSS_Initialize(SECU_ConfigDirectory(NULL), dbPrefix, dbPrefix,
-			       "secmod.db", readonly ? NSS_INIT_READONLY : 0);
-    if (secstatus != SECSuccess) {
-	SECU_PrintPRandOSError(progName);
-	return -1;
+    if (showFileCRL) {
+	NSS_NoDB_Init(NULL);
     }
+    else {
+	secstatus = NSS_Initialize(SECU_ConfigDirectory(NULL), dbPrefix, dbPrefix,
+				"secmod.db", readonly ? NSS_INIT_READONLY : 0);
+	if (secstatus != SECSuccess) {
+	    SECU_PrintPRandOSError(progName);
+	    return -1;
+	}
+    }
+    
     SECU_RegisterDynamicOids();
 
     certHandle = CERT_GetDefaultCertDB();
@@ -1050,7 +1099,10 @@ int main(int argc, char **argv)
 	}
 	else if (importCRL) {
 	    rv = ImportCRL (certHandle, url, crlType, inFile, importOptions,
-			    decodeOptions);
+			    decodeOptions, &pwdata);
+	}
+	else if (showFileCRL) {
+	    rv = DumpCRL (inFile);
 	} else if (generateCRL || modifyCRL) {
 	    if (!inCrlInitFile)
 		inCrlInitFile = PR_STDIN;
@@ -1072,7 +1124,7 @@ int main(int argc, char **argv)
 	    ListCRLNames (certHandle, crlType, PR_FALSE);
 	    /* import CRL as a blob */
 	    rv = ImportCRL (certHandle, url, crlType, inFile, importOptions,
-			    decodeOptions);
+			    decodeOptions, &pwdata);
 	    /* list CRLs */
 	    ListCRLNames (certHandle, crlType, PR_FALSE);
 	}

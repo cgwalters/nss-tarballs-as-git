@@ -509,18 +509,23 @@ sftk_signTemplate(PLArenaPool *arena, SFTKDBHandle *handle,
 		  CK_ULONG count)
 {
     int i;
+    CK_RV crv;
     SFTKDBHandle *keyHandle = handle;
     SDB *keyTarget = NULL;
+    PRBool usingPeerDB = PR_FALSE;
+    PRBool inPeerDBTransaction = PR_FALSE;
 
     PORT_Assert(handle);
 
     if (handle->type != SFTK_KEYDB_TYPE) {
 	keyHandle = handle->peerDB;
+	usingPeerDB = PR_TRUE;
     }
 
     /* no key DB defined? then no need to sign anything */
     if (keyHandle == NULL) {
-	return CKR_OK;
+	crv = CKR_OK;
+	goto loser;
     }
 
     /* When we are in a middle of an update, we have an update database set, 
@@ -532,7 +537,17 @@ sftk_signTemplate(PLArenaPool *arena, SFTKDBHandle *handle,
 
     /* skip the the database does not support meta data */
     if ((keyTarget->sdb_flags & SDB_HAS_META) == 0) {
-	return CKR_OK;
+	crv = CKR_OK;
+	goto loser;
+    }
+
+    /* If we had to switch databases, we need to initialize a transaction. */
+    if (usingPeerDB) {
+	crv = (*keyTarget->sdb_Begin)(keyTarget);
+	if (crv != CKR_OK) {
+	    goto loser;
+	}
+	inPeerDBTransaction = PR_TRUE;
     }
 
     for (i=0; i < count; i ++) {
@@ -546,23 +561,44 @@ sftk_signTemplate(PLArenaPool *arena, SFTKDBHandle *handle,
 	    PZ_Lock(keyHandle->passwordLock);
 	    if (keyHandle->passwordKey.data == NULL) {
 		PZ_Unlock(keyHandle->passwordLock);
-		return CKR_USER_NOT_LOGGED_IN;
+		crv = CKR_USER_NOT_LOGGED_IN;
+		goto loser;
 	    }
 	    rv = sftkdb_SignAttribute(arena, &keyHandle->passwordKey, 
 				objectID, template[i].type,
 				&plainText, &signText);
 	    PZ_Unlock(keyHandle->passwordLock);
 	    if (rv != SECSuccess) {
-		return CKR_GENERAL_ERROR; /* better error code here? */
+		crv = CKR_GENERAL_ERROR; /* better error code here? */
+		goto loser;
 	    }
 	    rv = sftkdb_PutAttributeSignature(handle, keyTarget, 
 				objectID, template[i].type, signText);
 	    if (rv != SECSuccess) {
-		return CKR_GENERAL_ERROR; /* better error code here? */
+		crv = CKR_GENERAL_ERROR; /* better error code here? */
+		goto loser;
 	    }
 	}
     }
-    return CKR_OK;
+    crv = CKR_OK;
+
+    /* If necessary, commit the transaction */
+    if (inPeerDBTransaction) {
+	crv = (*keyTarget->sdb_Commit)(keyTarget);
+	if (crv != CKR_OK) {
+	    goto loser;
+	}
+	inPeerDBTransaction = PR_FALSE;
+    }
+
+loser:
+    if (inPeerDBTransaction) {
+	/* The transaction must have failed. Abort. */
+	(*keyTarget->sdb_Abort)(keyTarget);
+	PORT_Assert(crv != CKR_OK);
+	if (crv == CKR_OK) crv = CKR_GENERAL_ERROR;
+    }
+    return crv;
 }
 
 static CK_RV
@@ -766,6 +802,12 @@ sftkdb_getFindTemplate(CK_OBJECT_CLASS objectType, unsigned char *objTypeData,
 	if (attr == NULL) {
 	    return CKR_TEMPLATE_INCOMPLETE;
 	}
+	if (attr->ulValueLen == 0) {
+	    /* key is too generic to determine that it's unique, usually
+	     * happens in the key gen case */
+	    return CKR_OBJECT_HANDLE_INVALID;
+	}
+	
 	findTemplate[1] = *attr;
 	count = 2;
 	break;
@@ -807,7 +849,7 @@ sftkdb_getFindTemplate(CK_OBJECT_CLASS objectType, unsigned char *objTypeData,
 }
 
 /*
- * look to see if this object already exists and return it's object ID if
+ * look to see if this object already exists and return its object ID if
  * it does.
  */
 static CK_RV
@@ -827,6 +869,13 @@ sftkdb_lookupObject(SDB *db, CK_OBJECT_CLASS objectType,
     }
     crv = sftkdb_getFindTemplate(objectType, objTypeData,
 			findTemplate, &count, ptemplate, len);
+
+    if (crv == CKR_OBJECT_HANDLE_INVALID) {
+	/* key is too generic to determine that it's unique, usually
+	 * happens in the key gen case, tell the caller to go ahead
+	 * and just create it */
+	return CKR_OK;
+    }
     if (crv != CKR_OK) {
 	return crv;
     }
@@ -1446,6 +1495,9 @@ sftkdb_CloseDB(SFTKDBHandle *handle)
         }
 	(*handle->db->sdb_Close)(handle->db);
     }
+    if (handle->passwordKey.data) {
+	PORT_ZFree(handle->passwordKey.data, handle->passwordKey.len);
+    }
     if (handle->passwordLock) {
 	SKIP_AFTER_FORK(PZ_DestroyLock(handle->passwordLock));
     }
@@ -1865,17 +1917,15 @@ sftkdb_reconcileTrustEntry(PRArenaPool *arena, CK_ATTRIBUTE *target,
      * trust attribute should be, and neither agree exactly. 
      * At this point, we prefer 'hard' attributes over 'soft' ones. 
      * 'hard' ones are CKT_NSS_TRUSTED, CKT_NSS_TRUSTED_DELEGATOR, and
-     * CKT_NSS_UNTRUTED. Soft ones are ones which don't change the
-     * actual trust of the cert (CKT_MUST_VERIFY, CKT_NSS_VALID,
+     * CKT_NSS_NOT_TRUTED. Soft ones are ones which don't change the
+     * actual trust of the cert (CKT_MUST_VERIFY_TRUST, 
      * CKT_NSS_VALID_DELEGATOR).
      */
-    if ((sourceTrust == CKT_NSS_MUST_VERIFY) 
-	|| (sourceTrust == CKT_NSS_VALID)
+    if ((sourceTrust == CKT_NSS_MUST_VERIFY_TRUST) 
 	|| (sourceTrust == CKT_NSS_VALID_DELEGATOR)) {
 	return SFTKDB_DROP_ATTRIBUTE;
     }
-    if ((targetTrust == CKT_NSS_MUST_VERIFY) 
-	|| (targetTrust == CKT_NSS_VALID)
+    if ((targetTrust == CKT_NSS_MUST_VERIFY_TRUST) 
 	|| (targetTrust == CKT_NSS_VALID_DELEGATOR)) {
 	/* again, overwriting the target in this case is OK */
 	return SFTKDB_MODIFY_OBJECT;
@@ -2375,7 +2425,7 @@ sftk_freeDB(SFTKDBHandle *handle)
     PRInt32 ref;
 
     if (!handle) return;
-    ref = PR_AtomicDecrement(&handle->ref);
+    ref = PR_ATOMIC_DECREMENT(&handle->ref);
     if (ref == 0) {
 	sftkdb_CloseDB(handle);
     }
@@ -2395,7 +2445,7 @@ sftk_getCertDB(SFTKSlot *slot)
     PZ_Lock(slot->slotLock);
     dbHandle = slot->certDB;
     if (dbHandle) {
-        PR_AtomicIncrement(&dbHandle->ref);
+        PR_ATOMIC_INCREMENT(&dbHandle->ref);
     }
     PZ_Unlock(slot->slotLock);
     return dbHandle;
@@ -2413,7 +2463,7 @@ sftk_getKeyDB(SFTKSlot *slot)
     SKIP_AFTER_FORK(PZ_Lock(slot->slotLock));
     dbHandle = slot->keyDB;
     if (dbHandle) {
-        PR_AtomicIncrement(&dbHandle->ref);
+        PR_ATOMIC_INCREMENT(&dbHandle->ref);
     }
     SKIP_AFTER_FORK(PZ_Unlock(slot->slotLock));
     return dbHandle;
@@ -2431,7 +2481,7 @@ sftk_getDBForTokenObject(SFTKSlot *slot, CK_OBJECT_HANDLE objectID)
     PZ_Lock(slot->slotLock);
     dbHandle = objectID & SFTK_KEYDB_TYPE ? slot->keyDB : slot->certDB;
     if (dbHandle) {
-        PR_AtomicIncrement(&dbHandle->ref);
+        PR_ATOMIC_INCREMENT(&dbHandle->ref);
     }
     PZ_Unlock(slot->slotLock);
     return dbHandle;

@@ -40,7 +40,7 @@
  * ***** END LICENSE BLOCK ***** */
 
 /* ECC code moved here from ssl3con.c */
-/* $Id: ssl3ecc.c,v 1.23 2010/01/28 16:14:25 kaie%kuix.de Exp $ */
+/* $Id: ssl3ecc.c,v 1.26 2012/02/13 17:19:40 kaie%kuix.de Exp $ */
 
 #include "nss.h"
 #include "cert.h"
@@ -288,7 +288,7 @@ ssl3_ComputeECDHKeyHash(SECItem ec_params, SECItem server_ecpoint,
     PRINT_BUF(95, (NULL, "ECDHkey hash: MD5 result", hashes->md5, MD5_LENGTH));
     PRINT_BUF(95, (NULL, "ECDHkey hash: SHA1 result", hashes->sha, SHA1_LENGTH));
 
-    if (hashBuf != buf && hashBuf != NULL)
+    if (hashBuf != buf)
     	PORT_Free(hashBuf);
     return rv;
 }
@@ -317,7 +317,7 @@ ssl3_SendECDHClientKeyExchange(sslSocket * ss, SECKEYPublicKey * svrPubKey)
     }
     /* XXX SHOULD CALL ssl3_CreateECDHEphemeralKeys here, instead! */
     privKey = SECKEY_CreateECPrivateKey(&svrPubKey->u.ec.DEREncodedParams, 
-	                                &pubKey, NULL);
+	                                &pubKey, ss->pkcs11PinArg);
     if (!privKey || !pubKey) {
 	    ssl_MapLowLevelError(SEC_ERROR_KEYGEN_FAIL);
 	    rv = SECFailure;
@@ -968,6 +968,7 @@ ssl3_FilterECCipherSuitesByServerCerts(sslSocket * ss)
 	case SEC_OID_PKCS1_MD4_WITH_RSA_ENCRYPTION:
 	case SEC_OID_PKCS1_MD5_WITH_RSA_ENCRYPTION:
 	case SEC_OID_PKCS1_SHA1_WITH_RSA_ENCRYPTION:
+	case SEC_OID_PKCS1_SHA224_WITH_RSA_ENCRYPTION:
 	case SEC_OID_PKCS1_SHA256_WITH_RSA_ENCRYPTION:
 	case SEC_OID_PKCS1_SHA384_WITH_RSA_ENCRYPTION:
 	case SEC_OID_PKCS1_SHA512_WITH_RSA_ENCRYPTION:

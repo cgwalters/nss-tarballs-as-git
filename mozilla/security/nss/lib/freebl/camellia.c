@@ -36,7 +36,7 @@
  * ***** END LICENSE BLOCK ***** */
 
 /*
- * $Id: camellia.c,v 1.2 2008/11/18 19:48:22 rrelyea%redhat.com Exp $
+ * $Id: camellia.c,v 1.4 2010/07/20 01:26:02 wtc%google.com Exp $
  */
 
 #ifdef FREEBL_NO_DEPEND
@@ -50,6 +50,7 @@
 #include "prtypes.h"
 #include "blapi.h"
 #include "camellia.h"
+#include "sha_fast.h" /* for SHA_HTONL and related configuration macros */
 
 
 /* key constants */
@@ -72,13 +73,18 @@
  */
 
 
-#if defined(_MSC_VER)
+#if defined(SHA_ALLOW_UNALIGNED_ACCESS)
 
-# define SWAP(x) (_lrotl(x, 8) & 0x00ff00ff | _lrotr(x, 8) & 0xff00ff00)
-# define GETU32(p) SWAP(*((PRUint32 *)(p)))
-# define PUTU32(ct, st) {*((PRUint32 *)(ct)) = SWAP((st));}
+/* require a CPU that allows unaligned access */
 
-#else /* not MS-VC */
+#if defined(SHA_NEED_TMP_VARIABLE)
+#define CAMELLIA_NEED_TMP_VARIABLE 1
+#endif
+
+# define GETU32(p) SHA_HTONL(*((PRUint32 *)(p)))
+# define PUTU32(ct, st) {*((PRUint32 *)(ct)) = SHA_HTONL(st);}
+
+#else /* no unaligned access */
 
 # define GETU32(pt)					\
     (((PRUint32)(pt)[0] << 24)				\
@@ -471,6 +477,9 @@ void camellia_setup128(const unsigned char *key, PRUint32 *subkey)
     PRUint32 kw4l, kw4r, dw, tl, tr;
     PRUint32 subL[26];
     PRUint32 subR[26];
+#if defined(CAMELLIA_NEED_TMP_VARIABLE)
+    PRUint32 tmp;
+#endif
 
     /**
      *  k == kll || klr || krl || krr (|| is concatination)
@@ -683,6 +692,9 @@ void camellia_setup256(const unsigned char *key, PRUint32 *subkey)
     PRUint32 kw4l, kw4r, dw, tl, tr;
     PRUint32 subL[34];
     PRUint32 subR[34];
+#if defined(CAMELLIA_NEED_TMP_VARIABLE)
+    PRUint32 tmp;
+#endif
 
     /**
      *  key = (kll || klr || krl || krr || krll || krlr || krrl || krrr)
@@ -989,6 +1001,9 @@ camellia_encrypt128(const PRUint32 *subkey,
 {
     PRUint32 il, ir, t0, t1;
     PRUint32 io[4];
+#if defined(CAMELLIA_NEED_TMP_VARIABLE)
+    PRUint32 tmp;
+#endif
 
     io[0] = GETU32(input);
     io[1] = GETU32(input+4);
@@ -1093,6 +1108,9 @@ camellia_decrypt128(const PRUint32 *subkey,
 {
     PRUint32 il,ir,t0,t1;               /* temporary valiables */
     PRUint32 io[4];
+#if defined(CAMELLIA_NEED_TMP_VARIABLE)
+    PRUint32 tmp;
+#endif
 
     io[0] = GETU32(input);
     io[1] = GETU32(input+4);
@@ -1200,6 +1218,9 @@ camellia_encrypt256(const PRUint32 *subkey,
 {
     PRUint32 il,ir,t0,t1;           /* temporary valiables */
     PRUint32 io[4];
+#if defined(CAMELLIA_NEED_TMP_VARIABLE)
+    PRUint32 tmp;
+#endif
 
     io[0] = GETU32(input);
     io[1] = GETU32(input+4);
@@ -1328,6 +1349,9 @@ camellia_decrypt256(const PRUint32 *subkey,
 {
     PRUint32 il,ir,t0,t1;           /* temporary valiables */
     PRUint32 io[4];
+#if defined(CAMELLIA_NEED_TMP_VARIABLE)
+    PRUint32 tmp;
+#endif
 
     io[0] = GETU32(input);
     io[1] = GETU32(input+4);

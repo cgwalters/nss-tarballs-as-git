@@ -843,7 +843,10 @@ safe_pclose(FILE *fp)
 }
 
 #ifdef DARWIN
+#include <TargetConditionals.h>
+#if !TARGET_OS_IPHONE
 #include <crt_externs.h>
+#endif
 #endif
 
 /* Fork netstat to collect its output by default. Do not unset this unless
@@ -859,7 +862,12 @@ void RNG_SystemInfoForRNG(void)
     const char * const *cp;
     char *randfile;
 #ifdef DARWIN
+#if TARGET_OS_IPHONE
+    /* iOS does not expose a way to access environ. */
+    char **environ = NULL;
+#else
     char **environ = *_NSGetEnviron();
+#endif
 #else
     extern char **environ;
 #endif
@@ -940,11 +948,13 @@ void RNG_SystemInfoForRNG(void)
  * BSD/OS we do not call safe_popen when we succeeded in getting data
  * from /dev/urandom.
  *
- * Bug 174993: LINUX provides /dev/urandom, don't fork netstat
- * if data has been gathered successfully
+ * Bug 174993: On platforms providing /dev/urandom, don't fork netstat
+ * either, if data has been gathered successfully.
  */
 
-#if defined(BSDI) || defined(LINUX)
+#if defined(BSDI) || defined(FREEBSD) || defined(NETBSD) \
+    || defined(OPENBSD) || defined(DARWIN) || defined(LINUX) \
+    || defined(HPUX)
     if (bytes)
         return;
 #endif

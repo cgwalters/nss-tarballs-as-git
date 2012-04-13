@@ -50,6 +50,8 @@
 #include "p12local.h"
 #include "prcpucfg.h"
 
+extern const int NSS_PBE_DEFAULT_ITERATION_COUNT; /* defined in p7create.c */
+
 /*
 ** This PKCS12 file encoder uses numerous nested ASN.1 and PKCS7 encoder
 ** contexts.  It can be difficult to keep straight.  Here's a picture:
@@ -162,7 +164,6 @@ struct sec_pkcs12_hmac_and_output_info {
 typedef struct sec_PKCS12EncoderContextStr {
     PRArenaPool *arena;
     SEC_PKCS12ExportContext *p12exp;
-    PK11SymKey *encryptionKey;
 
     /* encoder information - this is set up based on whether 
      * password based or public key pased privacy is being used
@@ -1257,8 +1258,9 @@ SEC_PKCS12AddKeyForCert(SEC_PKCS12ExportContext *p12ctxt, SEC_PKCS12SafeInfo *sa
 	}
 
 	epki = PK11_ExportEncryptedPrivateKeyInfo(slot, algorithm, 
-						  &uniPwitem, cert, 1, 
-						  p12ctxt->wincx);
+					    &uniPwitem, cert,
+					    NSS_PBE_DEFAULT_ITERATION_COUNT,
+					    p12ctxt->wincx);
 	PK11_FreeSlot(slot);
 	if(!epki) {
 	    PORT_SetError(SEC_ERROR_PKCS12_UNABLE_TO_EXPORT_KEY);
@@ -1478,11 +1480,40 @@ loser:
  * Encoding routines
  *********************************/
 
+/* Clean up the resources allocated by a sec_PKCS12EncoderContext. */
+static void
+sec_pkcs12_encoder_destroy_context(sec_PKCS12EncoderContext *p12enc)
+{
+    if(p12enc) {
+	if(p12enc->outerA1ecx) {
+	    SEC_ASN1EncoderFinish(p12enc->outerA1ecx);
+	    p12enc->outerA1ecx = NULL;
+	}
+	if(p12enc->aSafeCinfo) {
+	    SEC_PKCS7DestroyContentInfo(p12enc->aSafeCinfo);
+	    p12enc->aSafeCinfo = NULL;
+	}
+	if(p12enc->middleP7ecx) {
+	    SEC_PKCS7EncoderFinish(p12enc->middleP7ecx, p12enc->p12exp->pwfn,
+				   p12enc->p12exp->pwfnarg);
+	    p12enc->middleP7ecx = NULL;
+	}
+	if(p12enc->middleA1ecx) {
+	    SEC_ASN1EncoderFinish(p12enc->middleA1ecx);
+	    p12enc->middleA1ecx = NULL;
+	}
+	if(p12enc->hmacCx) {
+	    PK11_DestroyContext(p12enc->hmacCx, PR_TRUE);
+	    p12enc->hmacCx = NULL;
+	}
+    }
+}
+
 /* set up the encoder context based on information in the export context
  * and return the newly allocated enocoder context.  A return of NULL 
  * indicates an error occurred. 
  */
-sec_PKCS12EncoderContext *
+static sec_PKCS12EncoderContext *
 sec_pkcs12_encoder_start_context(SEC_PKCS12ExportContext *p12exp)
 {
     sec_PKCS12EncoderContext *p12enc = NULL;
@@ -1573,14 +1604,21 @@ sec_pkcs12_encoder_start_context(SEC_PKCS12ExportContext *p12exp)
 	    }
 	    if(SECITEM_CopyItem(p12exp->arena, &(p12enc->mac.macSalt), salt) 
 			!= SECSuccess) {
+		/* XXX salt is leaked */
 		PORT_SetError(SEC_ERROR_NO_MEMORY);
 		goto loser;
 	    }   
+	    if (!SEC_ASN1EncodeInteger(p12exp->arena, &(p12enc->mac.iter),
+				       NSS_PBE_DEFAULT_ITERATION_COUNT)) {
+		/* XXX salt is leaked */
+		goto loser;
+	    }
 
 	    /* generate HMAC key */
 	    if(!sec_pkcs12_convert_item_to_unicode(NULL, &pwd, 
 			p12exp->integrityInfo.pwdInfo.password, PR_TRUE, 
 			PR_TRUE, PR_TRUE)) {
+		/* XXX salt is leaked */
 		goto loser;
 	    }
 	    /*
@@ -1588,7 +1626,8 @@ sec_pkcs12_encoder_start_context(SEC_PKCS12ExportContext *p12exp)
 	     * PBA keygens. PKCS #5 v2 support will require a change to
 	     * the PKCS #12 spec.
 	     */
-	    params = PK11_CreatePBEParams(salt, &pwd, 1);
+	    params = PK11_CreatePBEParams(salt, &pwd,
+                                          NSS_PBE_DEFAULT_ITERATION_COUNT);
 	    SECITEM_ZfreeItem(salt, PR_TRUE);
 	    SECITEM_ZfreeItem(&pwd, PR_FALSE);
 
@@ -1601,6 +1640,7 @@ sec_pkcs12_encoder_start_context(SEC_PKCS12ExportContext *p12exp)
 	    case SEC_OID_MD2:
 		integrityMechType = CKM_NETSCAPE_PBE_MD2_HMAC_KEY_GEN;  break;
 	    default:
+		/* XXX params is leaked */
 		goto loser;
 	    }
 
@@ -1639,14 +1679,7 @@ sec_pkcs12_encoder_start_context(SEC_PKCS12ExportContext *p12exp)
     return p12enc;
 
 loser:
-    if(p12enc) {
-	if(p12enc->aSafeCinfo) {
-	    SEC_PKCS7DestroyContentInfo(p12enc->aSafeCinfo);
-	}
-	if(p12enc->hmacCx) {
-	    PK11_DestroyContext(p12enc->hmacCx, PR_TRUE);
-	}
-    }
+    sec_pkcs12_encoder_destroy_context(p12enc);
     if (p12exp->arena != NULL)
 	PORT_ArenaRelease(p12exp->arena, mark);
 
@@ -2018,12 +2051,14 @@ SEC_PKCS12Encode(SEC_PKCS12ExportContext *p12exp,
     SEC_ASN1EncoderClearStreaming(p12enc->middleA1ecx);
     SEC_ASN1EncoderUpdate(p12enc->middleA1ecx, NULL, 0);
     SEC_ASN1EncoderFinish(p12enc->middleA1ecx);
+    p12enc->middleA1ecx = NULL;
 
     sec_FlushPkcs12OutputBuffer( &p12enc->middleBuf);
 
     /* finish the encoding of the authenticated safes */
     rv = SEC_PKCS7EncoderFinish(p12enc->middleP7ecx, p12exp->pwfn, 
     				p12exp->pwfnarg);
+    p12enc->middleP7ecx = NULL;
     if(rv != SECSuccess) {
 	goto loser;
     }
@@ -2041,8 +2076,10 @@ SEC_PKCS12Encode(SEC_PKCS12ExportContext *p12exp,
     rv = SEC_ASN1EncoderUpdate(p12enc->outerA1ecx, NULL, 0);
 
     SEC_ASN1EncoderFinish(p12enc->outerA1ecx);
+    p12enc->outerA1ecx = NULL;
 
 loser:
+    sec_pkcs12_encoder_destroy_context(p12enc);
     return rv;
 }
 
@@ -2072,4 +2109,3 @@ SEC_PKCS12DestroyExportContext(SEC_PKCS12ExportContext *p12ecx)
 
     PORT_FreeArena(p12ecx->arena, PR_TRUE);
 }
-

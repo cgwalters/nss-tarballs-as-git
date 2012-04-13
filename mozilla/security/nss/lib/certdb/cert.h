@@ -37,7 +37,7 @@
 /*
  * cert.h - public data structures and prototypes for the certificate library
  *
- * $Id: cert.h,v 1.79 2010/01/14 22:15:23 alexei.volkov.bugs%sun.com Exp $
+ * $Id: cert.h,v 1.88 2011/11/16 19:12:32 kaie%kuix.de Exp $
  */
 
 #ifndef _CERT_H_
@@ -298,13 +298,6 @@ CERT_GetCertificateRequestExtensions(CERTCertificateRequest *req,
 extern SECKEYPublicKey *CERT_ExtractPublicKey(CERTCertificate *cert);
 
 /*
- * used to get a public key with Key Material ID. Only used for fortezza V1
- * certificates.
- */
-extern SECKEYPublicKey *CERT_KMIDPublicKey(CERTCertificate *cert);
-
-
-/*
 ** Retrieve the Key Type associated with the cert we're dealing with
 */
 
@@ -450,12 +443,12 @@ extern SECStatus CERT_AddOKDomainName(CERTCertificate *cert, const char *hostnam
 extern CERTCertificate *
 CERT_DecodeDERCertificate (SECItem *derSignedCert, PRBool copyDER, char *nickname);
 /*
-** Decode a DER encoded CRL/KRL into an CERTSignedCrl structure
-**	"derSignedCrl" is the DER encoded signed crl/krl.
-**	"type" is this a CRL or KRL.
+** Decode a DER encoded CRL into a CERTSignedCrl structure
+**	"derSignedCrl" is the DER encoded signed CRL.
+**	"type" must be SEC_CRL_TYPE.
 */
 #define SEC_CRL_TYPE	1
-#define SEC_KRL_TYPE	0
+#define SEC_KRL_TYPE	0 /* deprecated */
 
 extern CERTSignedCrl *
 CERT_DecodeDERCrl (PLArenaPool *arena, SECItem *derSignedCrl,int type);
@@ -520,12 +513,6 @@ SECStatus CERT_CacheCRL(CERTCertDBHandle* dbhandle, SECItem* newcrl);
    for the application to free the memory after a successful removal
 */
 SECStatus CERT_UncacheCRL(CERTCertDBHandle* dbhandle, SECItem* oldcrl);
-
-/*
-** Decode a certificate and put it into the temporary certificate database
-*/
-extern CERTCertificate *
-CERT_DecodeCertificate (SECItem *derCert, char *nickname,PRBool copyDER);
 
 /*
 ** Find a certificate in the database
@@ -605,6 +592,16 @@ CERT_FindCertByEmailAddr(CERTCertDBHandle *handle, char *emailAddr);
 */
 CERTCertificate *
 CERT_FindCertByNicknameOrEmailAddr(CERTCertDBHandle *handle, const char *name);
+
+/*
+** Find a certificate in the database by a email address or nickname
+** and require it to have the given usage.
+**      "name" is the email address or nickname to look up
+*/
+CERTCertificate *
+CERT_FindCertByNicknameOrEmailAddrForUsage(CERTCertDBHandle *handle,
+                                           const char *name, 
+                                           SECCertUsage lookingForUsage);
 
 /*
 ** Find a certificate in the database by a digest of a subject public key
@@ -1102,7 +1099,7 @@ extern CERTCertificateList *
 CERT_CertListFromCert(CERTCertificate *cert);
 
 extern CERTCertificateList *
-CERT_DupCertList(CERTCertificateList * oldList);
+CERT_DupCertList(const CERTCertificateList * oldList);
 
 extern void CERT_DestroyCertificateList(CERTCertificateList *list);
 
@@ -1292,8 +1289,9 @@ CERT_CheckForEvilCert(CERTCertificate *cert);
 CERTGeneralName *
 CERT_GetCertificateNames(CERTCertificate *cert, PLArenaPool *arena);
 
-char *
-CERT_GetNickName(CERTCertificate   *cert, CERTCertDBHandle *handle, PLArenaPool *nicknameArena);
+CERTGeneralName *
+CERT_GetConstrainedCertificateNames(CERTCertificate *cert, PLArenaPool *arena,
+                                    PRBool includeSubjectCommonName);
 
 /*
  * Creates or adds to a list of all certs with a give subject name, sorted by
@@ -1651,26 +1649,33 @@ extern SECStatus CERT_PKIXVerifyCert(
 	CERTValInParam *paramsIn,
 	CERTValOutParam *paramsOut,
 	void *wincx);
-/*
- * This function changes the application defaults for the Verify function.
- * It should be called once at app initialization time, and only changes
- * if the default configuration changes.
- *
- * This changes the default values for the parameters specified. These
- * defaults can be overridden in CERT_PKIXVerifyCert() by explicitly 
- * setting the value in paramsIn.
- */
-extern SECStatus CERT_PKIXSetDefaults(CERTValInParam *paramsIn);
 
 /* Makes old cert validation APIs(CERT_VerifyCert, CERT_VerifyCertificate)
  * to use libpkix validation engine. The function should be called ones at
  * application initialization time.
  * Function is not thread safe.*/
-SECStatus CERT_SetUsePKIXForValidation(PRBool enable);
+extern SECStatus CERT_SetUsePKIXForValidation(PRBool enable);
 
 /* The function return PR_TRUE if cert validation should use
  * libpkix cert validation engine. */
-PRBool CERT_GetUsePKIXForValidation(void);
+extern PRBool CERT_GetUsePKIXForValidation(void);
+
+/*
+ * Allocate a parameter container of type CERTRevocationFlags,
+ * and allocate the inner arrays of the given sizes.
+ * To cleanup call CERT_DestroyCERTRevocationFlags.
+ */
+extern CERTRevocationFlags *
+CERT_AllocCERTRevocationFlags(
+    PRUint32 number_leaf_methods, PRUint32 number_leaf_pref_methods,
+    PRUint32 number_chain_methods, PRUint32 number_chain_pref_methods);
+
+/*
+ * Destroy the arrays inside flags,
+ * and destroy the object pointed to by flags, too.
+ */
+extern void
+CERT_DestroyCERTRevocationFlags(CERTRevocationFlags *flags);
 
 SEC_END_PROTOS
 

@@ -59,7 +59,7 @@
 /*
  * This array helps parsing between names, mechanisms, and flags.
  * to make the config files understand more entries, add them
- * to this table. (NOTE: we need function to export this table and it's size)
+ * to this table. (NOTE: we need function to export this table and its size)
  */
 PK11DefaultArrayEntry PK11_DefaultArray[] = {
 	{ "RSA", SECMOD_RSA_FLAG, CKM_RSA_PKCS },
@@ -73,6 +73,7 @@ PK11DefaultArrayEntry PK11_DefaultArray[] = {
 	{ "SEED", SECMOD_SEED_FLAG, CKM_SEED_CBC },
 	{ "RC5", SECMOD_RC5_FLAG, CKM_RC5_CBC },
 	{ "SHA-1", SECMOD_SHA1_FLAG, CKM_SHA_1 },
+/*	{ "SHA224", SECMOD_SHA256_FLAG, CKM_SHA224 }, */
 	{ "SHA256", SECMOD_SHA256_FLAG, CKM_SHA256 },
 /*	{ "SHA384", SECMOD_SHA512_FLAG, CKM_SHA384 }, */
 	{ "SHA512", SECMOD_SHA512_FLAG, CKM_SHA512 },
@@ -418,7 +419,7 @@ PK11_NewSlotInfo(SECMODModule *mod)
 PK11SlotInfo *
 PK11_ReferenceSlot(PK11SlotInfo *slot)
 {
-    PR_AtomicIncrement(&slot->refCount);
+    PR_ATOMIC_INCREMENT(&slot->refCount);
     return slot;
 }
 
@@ -460,7 +461,7 @@ PK11_DestroySlot(PK11SlotInfo *slot)
 void
 PK11_FreeSlot(PK11SlotInfo *slot)
 {
-    if (PR_AtomicDecrement(&slot->refCount) == 0) {
+    if (PR_ATOMIC_DECREMENT(&slot->refCount) == 0) {
 	PK11_DestroySlot(slot);
     }
 }
@@ -857,6 +858,7 @@ PK11_GetSlotList(CK_MECHANISM_TYPE type)
 	return &pk11_rc5SlotList;
     case CKM_SHA_1:
 	return &pk11_sha1SlotList;
+    case CKM_SHA224:
     case CKM_SHA256:
 	return &pk11_sha256SlotList;
     case CKM_SHA384:
@@ -1349,7 +1351,7 @@ pk11_isRootSlot(PK11SlotInfo *slot)
  * times as tokens are removed and re-inserted.
  */
 void
-PK11_InitSlot(SECMODModule *mod,CK_SLOT_ID slotID,PK11SlotInfo *slot)
+PK11_InitSlot(SECMODModule *mod, CK_SLOT_ID slotID, PK11SlotInfo *slot)
 {
     SECStatus rv;
     char *tmp;
@@ -1726,6 +1728,12 @@ PK11_NeedUserInit(PK11SlotInfo *slot)
 }
 
 static PK11SlotInfo *pk11InternalKeySlot = NULL;
+
+/*
+ * Set a new default internal keyslot. If one has already been set, clear it.
+ * Passing NULL falls back to the NSS normally selected default internal key
+ * slot.
+ */
 void
 pk11_SetInternalKeySlot(PK11SlotInfo *slot)
 {
@@ -1733,6 +1741,32 @@ pk11_SetInternalKeySlot(PK11SlotInfo *slot)
 	PK11_FreeSlot(pk11InternalKeySlot);
    }
    pk11InternalKeySlot = slot ? PK11_ReferenceSlot(slot) : NULL;
+}
+
+/*
+ * Set a new default internal keyslot if the normal key slot has not already
+ * been overridden. Subsequent calls to this function will be ignored unless
+ * pk11_SetInternalKeySlot is used to clear the current default.
+ */
+void
+pk11_SetInternalKeySlotIfFirst(PK11SlotInfo *slot)
+{
+   if (pk11InternalKeySlot) {
+	return;
+   }
+   pk11InternalKeySlot = slot ? PK11_ReferenceSlot(slot) : NULL;
+}
+
+/*
+ * Swap out a default internal keyslot.  Caller owns the Slot Reference
+ */
+PK11SlotInfo *
+pk11_SwapInternalKeySlot(PK11SlotInfo *slot)
+{
+   PK11SlotInfo *swap = pk11InternalKeySlot;
+
+   pk11InternalKeySlot = slot ? PK11_ReferenceSlot(slot) : NULL;
+   return swap;
 }
 
 
@@ -1992,6 +2026,7 @@ PK11_GetBestSlotMultiple(CK_MECHANISM_TYPE *type, int mech_count, void *wincx)
     for (i=0; i < mech_count; i++) {
 	if ((type[i] != CKM_FAKE_RANDOM) && 
 	    (type[i] != CKM_SHA_1) &&
+	    (type[i] != CKM_SHA224) &&
 	    (type[i] != CKM_SHA256) &&
 	    (type[i] != CKM_SHA384) &&
 	    (type[i] != CKM_SHA512) &&

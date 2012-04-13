@@ -217,6 +217,8 @@ static void Usage(const char *progName)
     fprintf(stderr, "%-20s Disable TLS (SSL v3.1).\n", "-T");
     fprintf(stderr, "%-20s Prints only payload data. Skips HTTP header.\n", "-S");
     fprintf(stderr, "%-20s Client speaks first. \n", "-f");
+    fprintf(stderr, "%-20s Use synchronous certificate validation "
+                    "(required for SSL2)\n", "-O");
     fprintf(stderr, "%-20s Override bad server cert. Make it OK.\n", "-o");
     fprintf(stderr, "%-20s Disable SSL socket locking.\n", "-s");
     fprintf(stderr, "%-20s Verbose progress reporting.\n", "-v");
@@ -225,6 +227,7 @@ static void Usage(const char *progName)
     fprintf(stderr, "%-20s Renegotiate N times (resuming session if N>1).\n", "-r N");
     fprintf(stderr, "%-20s Enable the session ticket extension.\n", "-u");
     fprintf(stderr, "%-20s Enable compression.\n", "-z");
+    fprintf(stderr, "%-20s Enable false start.\n", "-g");
     fprintf(stderr, "%-20s Letter(s) chosen from the following list\n", 
                     "-c ciphers");
     fprintf(stderr, 
@@ -292,6 +295,16 @@ disableAllSSLCiphers(void)
     }
 }
 
+typedef struct
+{
+   PRBool shouldPause; /* PR_TRUE if we should use asynchronous peer cert 
+                        * authentication */
+   PRBool isPaused;    /* PR_TRUE if libssl is waiting for us to validate the
+                        * peer's certificate and restart the handshake. */
+   void * dbHandle;    /* Certificate database handle to use while
+                        * authenticating the peer's certificate. */
+} ServerCertAuth;
+
 /*
  * Callback is called when incoming certificate is not valid.
  * Returns SECSuccess to accept the cert anyway, SECFailure to reject.
@@ -304,6 +317,21 @@ ownBadCertHandler(void * arg, PRFileDesc * socket)
     fprintf(stderr, "Bad server certificate: %d, %s\n", err, 
             SECU_Strerror(err));
     return SECSuccess;	/* override, say it's OK. */
+}
+
+static SECStatus 
+ownAuthCertificate(void *arg, PRFileDesc *fd, PRBool checkSig,
+                       PRBool isServer)
+{
+    ServerCertAuth * serverCertAuth = (ServerCertAuth *) arg;
+
+    FPRINTF(stderr, "%s: using asynchronous certificate validation\n",
+	    progName);
+
+    PORT_Assert(serverCertAuth->shouldPause);
+    PORT_Assert(!serverCertAuth->isPaused);
+    serverCertAuth->isPaused = PR_TRUE;
+    return SECWouldBlock;
 }
 
 SECStatus
@@ -497,11 +525,47 @@ separateReqHeader(const PRFileDesc* outFd, const char* buf, const int nb,
 	Usage(progName); \
     }
 
+static SECStatus
+restartHandshakeAfterServerCertIfNeeded(PRFileDesc * fd,
+                                        ServerCertAuth * serverCertAuth,
+                                        PRBool override)
+{
+    SECStatus rv;
+    PRErrorCode status;
+    
+    if (!serverCertAuth->isPaused)
+	return SECSuccess;
+    
+    FPRINTF(stderr, "%s: handshake was paused by auth certificate hook\n",
+            progName);
+
+    serverCertAuth->isPaused = PR_FALSE;
+    rv = SSL_AuthCertificate(serverCertAuth->dbHandle, fd, PR_TRUE, PR_FALSE);
+    if (rv != SECSuccess) {
+        status = PR_GetError();
+        if (status == 0) {
+            PR_NOT_REACHED("SSL_AuthCertificate return SECFailure without "
+                           "setting error code.");
+            status = PR_INVALID_STATE_ERROR;
+        } else if (override) {
+            rv = ownBadCertHandler(NULL, fd);
+        }
+    }
+    if (rv == SECSuccess) {
+        status = 0;
+    }
+
+    if (SSL_AuthCertificateComplete(fd, status) != SECSuccess) {
+        rv = SECFailure;
+    }
+
+    return rv;
+}
+    
 int main(int argc, char **argv)
 {
     PRFileDesc *       s;
     PRFileDesc *       std_out;
-    CERTCertDBHandle * handle;
     char *             host	=  NULL;
     char *             certDir  =  NULL;
     char *             nickname =  NULL;
@@ -521,6 +585,7 @@ int main(int argc, char **argv)
     int                useExportPolicy = 0;
     int                enableSessionTickets = 0;
     int                enableCompression = 0;
+    int                enableFalseStart = 0;
     PRSocketOptionData opt;
     PRNetAddr          addr;
     PRPollDesc         pollset[2];
@@ -528,6 +593,7 @@ int main(int argc, char **argv)
     PRBool             clientSpeaksFirst = PR_FALSE;
     PRBool             wrStarted = PR_FALSE;
     PRBool             skipProtoHeader = PR_FALSE;
+    ServerCertAuth     serverCertAuth;
     int                headerSeparatorPtrnId = 0;
     int                error = 0;
     PRUint16           portno = 443;
@@ -536,6 +602,10 @@ int main(int argc, char **argv)
     PLOptState *optstate;
     PLOptStatus optstatus;
     PRStatus prStatus;
+
+    serverCertAuth.shouldPause = PR_TRUE;
+    serverCertAuth.isPaused = PR_FALSE;
+    serverCertAuth.dbHandle = NULL;
 
     progName = strrchr(argv[0], '/');
     if (!progName)
@@ -551,7 +621,7 @@ int main(int argc, char **argv)
     }
 
     optstate = PL_CreateOptState(argc, argv,
-                                 "23BSTW:a:c:d:fh:m:n:op:qr:suvw:xz");
+                                 "23BOSTW:a:c:d:fgh:m:n:op:qr:suvw:xz");
     while ((optstatus = PL_GetNextOpt(optstate)) == PL_OPT_OK) {
 	switch (optstate->option) {
 	  case '?':
@@ -562,6 +632,8 @@ int main(int argc, char **argv)
           case '3': disableSSL3 = 1; 			break;
 
           case 'B': bypassPKCS11 = 1; 			break;
+
+          case 'O': serverCertAuth.shouldPause = PR_FALSE; break;
 
           case 'S': skipProtoHeader = PR_TRUE;                 break;
 
@@ -577,6 +649,8 @@ int main(int argc, char **argv)
                     break;
 
           case 'c': cipherString = PORT_Strdup(optstate->value); break;
+
+          case 'g': enableFalseStart = 1; 		break;
 
           case 'd': certDir = PORT_Strdup(optstate->value);   break;
 
@@ -646,14 +720,8 @@ int main(int argc, char **argv)
     rv = NSS_Init(certDir);
     if (rv != SECSuccess) {
 	SECU_PrintError(progName, "unable to open cert database");
-#if 0
-    rv = CERT_OpenVolatileCertDB(handle);
-	CERT_SetDefaultCertDB(handle);
-#else
 	return 1;
-#endif
     }
-    handle = CERT_GetDefaultCertDB();
 
     /* set the policy bits true for all the cipher suites. */
     if (useExportPolicy)
@@ -829,10 +897,9 @@ int main(int argc, char **argv)
 	return 1;
     }
 
-    /* disable ssl2 and ssl2-compatible client hellos. */
     rv = SSL_OptionSet(s, SSL_V2_COMPATIBLE_HELLO, !disableSSL2);
     if (rv != SECSuccess) {
-	SECU_PrintError(progName, "error disabling v2 compatibility");
+	SECU_PrintError(progName, "error enabling SSLv2 compatible hellos ");
 	return 1;
     }
 
@@ -863,10 +930,23 @@ int main(int argc, char **argv)
 	SECU_PrintError(progName, "error enabling compression");
 	return 1;
     }
-               
+
+    /* enable false start. */
+    rv = SSL_OptionSet(s, SSL_ENABLE_FALSE_START, enableFalseStart);
+    if (rv != SECSuccess) {
+	SECU_PrintError(progName, "error enabling false start");
+	return 1;
+    }
+
     SSL_SetPKCS11PinArg(s, &pwdata);
 
-    SSL_AuthCertificateHook(s, SSL_AuthCertificate, (void *)handle);
+    serverCertAuth.dbHandle = CERT_GetDefaultCertDB();
+
+    if (serverCertAuth.shouldPause) {
+	SSL_AuthCertificateHook(s, ownAuthCertificate, &serverCertAuth);
+    } else {
+	SSL_AuthCertificateHook(s, SSL_AuthCertificate, serverCertAuth.dbHandle);
+    }
     if (override) {
 	SSL_BadCertHook(s, ownBadCertHandler, NULL);
     }
@@ -974,6 +1054,14 @@ int main(int argc, char **argv)
 	char buf[4000];	/* buffer for stdin */
 	int nb;		/* num bytes read from stdin. */
 
+	rv = restartHandshakeAfterServerCertIfNeeded(s, &serverCertAuth,
+						     override);
+	if (rv != SECSuccess) {
+	    error = 254; /* 254 (usually) means "handshake failed" */
+	    SECU_PrintError(progName, "authentication of server cert failed");
+	    goto done;
+	}
+	        
 	pollset[SSOCK_FD].out_flags = 0;
 	pollset[STDIN_FD].out_flags = 0;
 
@@ -1032,6 +1120,15 @@ int main(int argc, char **argv)
 		    nb   -= cc;
 		    if (nb <= 0) 
 		    	break;
+
+		    rv = restartHandshakeAfterServerCertIfNeeded(s,
+				&serverCertAuth, override);
+		    if (rv != SECSuccess) {
+			error = 254; /* 254 (usually) means "handshake failed" */
+			SECU_PrintError(progName, "authentication of server cert failed");
+			goto done;
+		    }
+
 		    pollset[SSOCK_FD].in_flags = PR_POLL_WRITE | PR_POLL_EXCEPT;
 		    pollset[SSOCK_FD].out_flags = 0;
 		    FPRINTF(stderr,

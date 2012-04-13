@@ -37,7 +37,7 @@
  * the terms of any one of the MPL, the GPL or the LGPL.
  *
  * ***** END LICENSE BLOCK ***** */
-/* $Id: secvfy.c,v 1.23 2010/02/10 00:49:43 wtc%google.com Exp $ */
+/* $Id: secvfy.c,v 1.28 2012/02/25 14:32:45 kaie%kuix.de Exp $ */
 
 #include <stdio.h>
 #include "cryptohi.h"
@@ -237,9 +237,14 @@ sec_DecodeSigAlg(const SECKEYPublicKey *key, SECOidTag sigAlg,
         *hashalg = SEC_OID_SHA1;
 	break;
       case SEC_OID_PKCS1_RSA_ENCRYPTION:
+      case SEC_OID_PKCS1_RSA_PSS_SIGNATURE:
         *hashalg = SEC_OID_UNKNOWN; /* get it from the RSA signature */
 	break;
 
+      case SEC_OID_ANSIX962_ECDSA_SHA224_SIGNATURE:
+      case SEC_OID_PKCS1_SHA224_WITH_RSA_ENCRYPTION:
+	*hashalg = SEC_OID_SHA224;
+	break;
       case SEC_OID_ANSIX962_ECDSA_SHA256_SIGNATURE:
       case SEC_OID_PKCS1_SHA256_WITH_RSA_ENCRYPTION:
 	*hashalg = SEC_OID_SHA256;
@@ -275,9 +280,7 @@ sec_DecodeSigAlg(const SECKEYPublicKey *key, SECOidTag sigAlg,
 	if (len < 28) { /* 28 bytes == 224 bits */
 	    *hashalg = SEC_OID_SHA1;
 	} else if (len < 32) { /* 32 bytes == 256 bits */
-	    /* SHA 224 not supported in NSS */
-	    PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
-	    return SECFailure;
+	    *hashalg = SEC_OID_SHA224;
 	} else if (len < 48) { /* 48 bytes == 384 bits */
 	    *hashalg = SEC_OID_SHA256;
 	} else if (len < 64) { /* 48 bytes == 512 bits */
@@ -297,11 +300,13 @@ sec_DecodeSigAlg(const SECKEYPublicKey *key, SECOidTag sigAlg,
 	    return SECFailure;
 	}
 	rv = SEC_QuickDERDecodeItem(arena, &oid, hashParameterTemplate, param);
-	if (rv != SECSuccess) {
-	    PORT_FreeArena(arena, PR_FALSE);
+	if (rv == SECSuccess) {
+            *hashalg = SECOID_FindOIDTag(&oid);
+        }
+        PORT_FreeArena(arena, PR_FALSE);
+        if (rv != SECSuccess) {
 	    return rv;
 	}
-	*hashalg = SECOID_FindOIDTag(&oid);
 	/* only accept hash algorithms */
 	if (HASH_GetHashTypeByOidTag(*hashalg) == HASH_AlgNULL) {
 	    /* error set by HASH_GetHashTypeByOidTag */
@@ -322,10 +327,14 @@ sec_DecodeSigAlg(const SECKEYPublicKey *key, SECOidTag sigAlg,
       case SEC_OID_PKCS1_SHA1_WITH_RSA_ENCRYPTION:
       case SEC_OID_ISO_SHA_WITH_RSA_SIGNATURE:
       case SEC_OID_ISO_SHA1_WITH_RSA_SIGNATURE:
+      case SEC_OID_PKCS1_SHA224_WITH_RSA_ENCRYPTION:
       case SEC_OID_PKCS1_SHA256_WITH_RSA_ENCRYPTION:
       case SEC_OID_PKCS1_SHA384_WITH_RSA_ENCRYPTION:
       case SEC_OID_PKCS1_SHA512_WITH_RSA_ENCRYPTION:
 	*encalg = SEC_OID_PKCS1_RSA_ENCRYPTION;
+	break;
+      case SEC_OID_PKCS1_RSA_PSS_SIGNATURE:
+	*encalg = SEC_OID_PKCS1_RSA_PSS_SIGNATURE;
 	break;
 
       /* what about normal DSA? */
@@ -340,6 +349,7 @@ sec_DecodeSigAlg(const SECKEYPublicKey *key, SECOidTag sigAlg,
 	*encalg = SEC_OID_MISSI_DSS;
 	break;
       case SEC_OID_ANSIX962_ECDSA_SHA1_SIGNATURE:
+      case SEC_OID_ANSIX962_ECDSA_SHA224_SIGNATURE:
       case SEC_OID_ANSIX962_ECDSA_SHA256_SIGNATURE:
       case SEC_OID_ANSIX962_ECDSA_SHA384_SIGNATURE:
       case SEC_OID_ANSIX962_ECDSA_SHA512_SIGNATURE:
@@ -378,8 +388,10 @@ vfy_CreateContext(const SECKEYPublicKey *key, const SECItem *sig,
     KeyType type;
 
     /* make sure the encryption algorithm matches the key type */
+    /* RSA-PSS algorithm can be used with both rsaKey and rsaPssKey */
     type = seckey_GetKeyType(encAlg);
-    if (key->keyType != type) {
+    if ((key->keyType != type) &&
+	((key->keyType != rsaKey) || (type != rsaPssKey))) {
 	PORT_SetError(SEC_ERROR_PKCS7_KEYALG_MISMATCH);
 	return NULL;
     }
@@ -396,7 +408,7 @@ vfy_CreateContext(const SECKEYPublicKey *key, const SECItem *sig,
     cx->key = SECKEY_CopyPublicKey(key);
     rv = SECSuccess;
     if (sig) {
-	switch (key->keyType) {
+	switch (type) {
 	case rsaKey:
 	    rv = DecryptSigBlock(&cx->hashAlg, cx->u.buffer, &cx->rsadigestlen,
 			HASH_LENGTH_MAX, cx->key, sig, (char*)wincx);

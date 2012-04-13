@@ -38,7 +38,7 @@
 /*
  * CMS miscellaneous utility functions.
  *
- * $Id: cmsutil.c,v 1.15 2008/03/10 00:01:27 wtc%google.com Exp $
+ * $Id: cmsutil.c,v 1.17 2011/09/30 19:42:09 rrelyea%redhat.com Exp $
  */
 
 #include "cmslocal.h"
@@ -211,6 +211,45 @@ NSS_CMSAlgArray_GetIndexByAlgTag(SECAlgorithmID **algorithmArray,
     return i;
 }
 
+/*
+ * Map a sign algorithm to a digest algorithm.
+ * This is used to handle incorrectly formatted packages sent to us
+ * from Windows 2003.
+ */
+SECOidTag
+NSS_CMSUtil_MapSignAlgs(SECOidTag signAlg)
+{
+    switch (signAlg) {
+    case SEC_OID_PKCS1_MD2_WITH_RSA_ENCRYPTION:
+	return SEC_OID_MD2;
+	break;
+    case SEC_OID_PKCS1_MD5_WITH_RSA_ENCRYPTION:
+	return SEC_OID_MD5;
+	break;
+    case SEC_OID_PKCS1_SHA1_WITH_RSA_ENCRYPTION:
+    case SEC_OID_ANSIX962_ECDSA_SHA1_SIGNATURE:
+    case SEC_OID_ANSIX9_DSA_SIGNATURE_WITH_SHA1_DIGEST:
+	return SEC_OID_SHA1;
+	break;
+    case SEC_OID_PKCS1_SHA256_WITH_RSA_ENCRYPTION:
+    case SEC_OID_ANSIX962_ECDSA_SHA256_SIGNATURE:
+	return SEC_OID_SHA256;
+	break;
+    case SEC_OID_PKCS1_SHA384_WITH_RSA_ENCRYPTION:
+    case SEC_OID_ANSIX962_ECDSA_SHA384_SIGNATURE:
+	return SEC_OID_SHA384;
+	break;
+    case SEC_OID_PKCS1_SHA512_WITH_RSA_ENCRYPTION:
+    case SEC_OID_ANSIX962_ECDSA_SHA512_SIGNATURE:
+	return SEC_OID_SHA512;
+	break;
+    default:
+	break;
+    }
+    /* not one of the algtags incorrectly sent to us*/
+    return signAlg;
+}
+
 const SECHashObject *
 NSS_CMSUtil_GetHashObjByAlgID(SECAlgorithmID *algid)
 {
@@ -243,8 +282,7 @@ NSS_CMSUtil_GetTemplateByTypeTag(SECOidTag type)
 	template = NSSCMSDigestedDataTemplate;
 	break;
     default:
-    case SEC_OID_PKCS7_DATA:
-	template = NULL;
+	template = NSS_CMSType_GetTemplate(type);
 	break;
     }
     return template;
@@ -269,8 +307,7 @@ NSS_CMSUtil_GetSizeByTypeTag(SECOidTag type)
 	size = sizeof(NSSCMSDigestedData);
 	break;
     default:
-    case SEC_OID_PKCS7_DATA:
-	size = 0;
+	size = NSS_CMSType_GetContentSize(type);
 	break;
     }
     return size;
@@ -300,6 +337,9 @@ NSS_CMSContent_GetContentInfo(void *msg, SECOidTag type)
 	break;
     default:
 	cinfo = NULL;
+	if (NSS_CMSType_IsWrapper(type)) {
+	    cinfo = &(c.genericData->contentInfo);
+	}
     }
     return cinfo;
 }
@@ -349,3 +389,4 @@ NSS_CMSDEREncode(NSSCMSMessage *cmsg, SECItem *input, SECItem *derOut,
     }
     return rv;
 }
+

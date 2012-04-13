@@ -40,7 +40,7 @@
  * encoding/creation side *and* the decoding/decryption side.  Anything
  * else should be static routines in the appropriate file.
  *
- * $Id: p7local.c,v 1.13 2008/05/30 03:39:46 nelson%bolyard.com Exp $
+ * $Id: p7local.c,v 1.15 2011/08/21 01:14:17 wtc%google.com Exp $
  */
 
 #include "p7local.h"
@@ -104,8 +104,8 @@ sec_PKCS7CreateDecryptObject (PK11SymKey *key, SECAlgorithmID *algid)
     SECOidTag algtag;
     void *ciphercx;
     CK_MECHANISM_TYPE cryptoMechType;
-    SECItem *param;
     PK11SlotInfo *slot;
+    SECItem *param = NULL;
 
     result = (struct sec_pkcs7_cipher_object*)
       PORT_ZAlloc (sizeof(struct sec_pkcs7_cipher_object));
@@ -127,6 +127,7 @@ sec_PKCS7CreateDecryptObject (PK11SymKey *key, SECAlgorithmID *algid)
 	cryptoMechType = PK11_GetPBECryptoMechanism(algid, &param, pwitem);
 	if (cryptoMechType == CKM_INVALID_MECHANISM) {
 	    PORT_Free(result);
+	    SECITEM_FreeItem(param,PR_TRUE);
 	    return NULL;
 	}
     } else {
@@ -178,11 +179,11 @@ sec_PKCS7CreateEncryptObject (PRArenaPool *poolp, PK11SymKey *key,
 {
     sec_PKCS7CipherObject *result;
     void *ciphercx;
-    SECItem *param;
     SECStatus rv;
     CK_MECHANISM_TYPE cryptoMechType;
-    PRBool needToEncodeAlgid = PR_FALSE;
     PK11SlotInfo *slot;
+    SECItem *param = NULL;
+    PRBool needToEncodeAlgid = PR_FALSE;
 
     result = (struct sec_pkcs7_cipher_object*)
 	      PORT_ZAlloc (sizeof(struct sec_pkcs7_cipher_object));
@@ -202,6 +203,7 @@ sec_PKCS7CreateEncryptObject (PRArenaPool *poolp, PK11SymKey *key,
 	cryptoMechType = PK11_GetPBECryptoMechanism(algid, &param, pwitem);
 	if (cryptoMechType == CKM_INVALID_MECHANISM) {
 	    PORT_Free(result);
+	    SECITEM_FreeItem(param,PR_TRUE);
 	    return NULL;
 	}
     } else {
@@ -1306,63 +1308,6 @@ static const SEC_ASN1Template SEC_PointerToPKCS7EncryptedDataTemplate[] = {
     { SEC_ASN1_POINTER, 0, SEC_PKCS7EncryptedDataTemplate }
 };
 
-const SEC_ASN1Template SEC_SMIMEKEAParamTemplateSkipjack[] = {
-	{ SEC_ASN1_SEQUENCE,
-	  0, NULL, sizeof(SEC_PKCS7SMIMEKEAParameters) },
-	{ SEC_ASN1_OCTET_STRING /* | SEC_ASN1_OPTIONAL */,
-	  offsetof(SEC_PKCS7SMIMEKEAParameters,originatorKEAKey) },
-	{ SEC_ASN1_OCTET_STRING,
-	  offsetof(SEC_PKCS7SMIMEKEAParameters,originatorRA) },
-	{ 0 }
-};
-
-const SEC_ASN1Template SEC_SMIMEKEAParamTemplateNoSkipjack[] = {
-	{ SEC_ASN1_SEQUENCE,
-	  0, NULL, sizeof(SEC_PKCS7SMIMEKEAParameters) },
-	{ SEC_ASN1_OCTET_STRING /* | SEC_ASN1_OPTIONAL */,
-	  offsetof(SEC_PKCS7SMIMEKEAParameters,originatorKEAKey) },
-	{ SEC_ASN1_OCTET_STRING,
-	  offsetof(SEC_PKCS7SMIMEKEAParameters,originatorRA) },
-	{ SEC_ASN1_OCTET_STRING  | SEC_ASN1_OPTIONAL ,
-	  offsetof(SEC_PKCS7SMIMEKEAParameters,nonSkipjackIV) },
-	{ 0 }
-};
-
-const SEC_ASN1Template SEC_SMIMEKEAParamTemplateAllParams[] = {
-	{ SEC_ASN1_SEQUENCE,
-	  0, NULL, sizeof(SEC_PKCS7SMIMEKEAParameters) },
-	{ SEC_ASN1_OCTET_STRING /* | SEC_ASN1_OPTIONAL */,
-	  offsetof(SEC_PKCS7SMIMEKEAParameters,originatorKEAKey) },
-	{ SEC_ASN1_OCTET_STRING,
-	  offsetof(SEC_PKCS7SMIMEKEAParameters,originatorRA) },
-	{ SEC_ASN1_OCTET_STRING  | SEC_ASN1_OPTIONAL ,
-	  offsetof(SEC_PKCS7SMIMEKEAParameters,nonSkipjackIV) },
-	{ SEC_ASN1_OCTET_STRING  | SEC_ASN1_OPTIONAL ,
-	  offsetof(SEC_PKCS7SMIMEKEAParameters,bulkKeySize) },
-	{ 0 }
-};
-
-const SEC_ASN1Template*
-sec_pkcs7_get_kea_template(SECKEATemplateSelector whichTemplate)
-{
-	const SEC_ASN1Template *returnVal = NULL;
-
-	switch(whichTemplate)
-	{
-	case SECKEAUsesNonSkipjack:
-		returnVal = SEC_SMIMEKEAParamTemplateNoSkipjack;
-		break;
-	case SECKEAUsesSkipjack:
-		returnVal = SEC_SMIMEKEAParamTemplateSkipjack;
-		break;
-	case SECKEAUsesNonSkipjackWithPaddedEncKey:
-	default:
-		returnVal = SEC_SMIMEKEAParamTemplateAllParams;
-		break;
-	}
-	return returnVal;
-}
-	
 static const SEC_ASN1Template *
 sec_pkcs7_choose_content_template(void *src_or_dest, PRBool encoding)
 {

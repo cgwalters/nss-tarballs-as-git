@@ -52,6 +52,8 @@
 #define SFTK_HANDLE_STRING_ARG(param,target,value,command) \
     if (PORT_Strncasecmp(param,value,sizeof(value)-1) == 0) { \
 	param += sizeof(value)-1; \
+	if (target) \
+	    PORT_Free(target); \
 	target = sftk_argFetchValue(param,&next); \
 	param += next; \
 	command ;\
@@ -338,7 +340,7 @@ static CK_RV
 sftk_parseTokenParameters(char *param, sftk_token_parameters *parsed) 
 {
     int next;
-    char *tmp;
+    char *tmp = NULL;
     char *index;
     index = sftk_argStrip(param);
 
@@ -355,9 +357,9 @@ sftk_parseTokenParameters(char *param, sftk_token_parameters *parsed)
 						"updateTokenDescription=",;)
 	SFTK_HANDLE_STRING_ARG(index,parsed->slotdes,"slotDescription=",;)
 	SFTK_HANDLE_STRING_ARG(index,tmp,"minPWLen=", 
-			if(tmp) { parsed->minPW=atoi(tmp); PORT_Free(tmp); })
+	   if(tmp) { parsed->minPW=atoi(tmp); PORT_Free(tmp); tmp = NULL; })
 	SFTK_HANDLE_STRING_ARG(index,tmp,"flags=", 
-	   if(tmp) { sftk_parseTokenFlags(param,parsed); PORT_Free(tmp); })
+	   if(tmp) { sftk_parseTokenFlags(param,parsed); PORT_Free(tmp); tmp = NULL; })
 	SFTK_HANDLE_FINAL_ARG(index)
    }
    return CKR_OK;
@@ -413,7 +415,7 @@ CK_RV
 sftk_parseParameters(char *param, sftk_parameters *parsed, PRBool isFIPS) 
 {
     int next;
-    char *tmp;
+    char *tmp = NULL;
     char *index;
     char *certPrefix = NULL, *keyPrefix = NULL;
     char *tokdes = NULL, *ptokdes = NULL, *pupdtokdes = NULL;
@@ -444,9 +446,9 @@ sftk_parseParameters(char *param, sftk_parameters *parsed, PRBool isFIPS)
 	SFTK_HANDLE_STRING_ARG(index,minPW,"minPWLen=",;)
 
 	SFTK_HANDLE_STRING_ARG(index,tmp,"flags=", 
-		if(tmp) { sftk_parseFlags(param,parsed); PORT_Free(tmp); })
+		if(tmp) { sftk_parseFlags(param,parsed); PORT_Free(tmp); tmp = NULL; })
 	SFTK_HANDLE_STRING_ARG(index,tmp,"tokens=", 
-		if(tmp) { sftk_parseTokens(tmp,parsed); PORT_Free(tmp); })
+		if(tmp) { sftk_parseTokens(tmp,parsed); PORT_Free(tmp); tmp = NULL; })
 	SFTK_HANDLE_FINAL_ARG(index)
     }
     if (parsed->tokens == NULL) {
@@ -605,6 +607,7 @@ sftk_getSecmodName(char *param, SDBType *dbType, char **appName,
     char *value = NULL;
     char *save_params = param;
     const char *lconfigdir;
+    PRBool noModDB = PR_FALSE;
     param = sftk_argStrip(param);
 	
 
@@ -629,7 +632,10 @@ sftk_getSecmodName(char *param, SDBType *dbType, char **appName,
 
    if (sftk_argHasFlag("flags","noModDB",save_params)) {
 	/* there isn't a module db, don't load the legacy support */
+	noModDB = PR_TRUE;
 	*dbType = SDB_SQL;
+	PORT_Free(*filename);
+	*filename = NULL;
         *rw = PR_FALSE;
    }
 
@@ -638,7 +644,9 @@ sftk_getSecmodName(char *param, SDBType *dbType, char **appName,
 	secmodName="pkcs11.txt";
    }
 
-   if (lconfigdir) {
+   if (noModDB) {
+	value = NULL;
+   } else if (lconfigdir && lconfigdir[0] != '\0') {
 	value = PR_smprintf("%s" PATH_SEPARATOR "%s",lconfigdir,secmodName);
    } else {
 	value = PR_smprintf("%s",secmodName);

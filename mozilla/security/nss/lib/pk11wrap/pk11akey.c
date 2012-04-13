@@ -57,7 +57,7 @@
 #include "sechash.h"
 
 #include "secpkcs5.h"  
-#include "ec.h"
+#include "blapit.h"
 
 static SECItem *
 pk11_MakeIDFromPublicKey(SECKEYPublicKey *pubKey)
@@ -223,6 +223,9 @@ PK11_ImportPublicKey(PK11SlotInfo *slot, SECKEYPublicKey *pubKey,
 	    }
 	    break;
 	default:
+	    if (ckaId) {
+		SECITEM_FreeItem(ckaId,PR_TRUE);
+	    }
 	    PORT_SetError( SEC_ERROR_BAD_KEY );
 	    return CK_INVALID_HANDLE;
 	}
@@ -272,7 +275,7 @@ pk11_Attr2SecItem(PRArenaPool *arena, const CK_ATTRIBUTE *attr, SECItem *item)
 /*
  * get a curve length from a set of ecParams.
  * 
- * We need this so we can reliably determine if a the ecPoint passed to us
+ * We need this so we can reliably determine if the ecPoint passed to us
  * was encoded or not. With out this, for many curves, we would incorrectly
  * identify an unencoded curve as an encoded curve 1 in 65536 times, and for
  * a few we would make that same mistake 1 in 32768 times. These are bad 
@@ -465,7 +468,7 @@ pk11_get_Decoded_ECPoint(PRArenaPool *arena, const SECItem *ecParams,
 	 * form that's correct, with a preference for the encoded form if we
 	 * can't determine for sure. We do this by checking the key we got
 	 * back from SEC_QuickDERDecodeItem for defects. If no defects are
-	 * found, we assume the encoded paramter was was passed to us.
+	 * found, we assume the encoded parameter was was passed to us.
 	 * our defect tests include:
 	 *   1) it didn't decode.
 	 *   2) The decode key had an invalid length (must be odd).
@@ -1154,6 +1157,11 @@ PK11_GenerateKeyPairWithOpFlags(PK11SlotInfo *slot,CK_MECHANISM_TYPE type,
 	return NULL;
     }
 
+    if (!param) {
+        PORT_SetError( SEC_ERROR_INVALID_ARGS );
+        return NULL;
+    }
+
     /*
      * The opFlags and opFlagMask parameters allow us to control the
      * settings of the key usage attributes (CKA_ENCRYPT and friends).
@@ -1566,12 +1574,35 @@ PK11_MakeKEAPubKey(unsigned char *keyData,int length)
     return pubk;
 }
 
+/*
+ * NOTE: This function doesn't return a SECKEYPrivateKey struct to represent
+ * the new private key object.  If it were to create a session object that
+ * could later be looked up by its nickname, it would leak a SECKEYPrivateKey.
+ * So isPerm must be true.
+ */
 SECStatus 
 PK11_ImportEncryptedPrivateKeyInfo(PK11SlotInfo *slot,
 			SECKEYEncryptedPrivateKeyInfo *epki, SECItem *pwitem,
 			SECItem *nickname, SECItem *publicValue, PRBool isPerm,
 			PRBool isPrivate, KeyType keyType, 
 			unsigned int keyUsage, void *wincx)
+{
+    if (!isPerm) {
+	PORT_SetError(SEC_ERROR_INVALID_ARGS);
+	return SECFailure;
+    }
+    return PK11_ImportEncryptedPrivateKeyInfoAndReturnKey(slot, epki,
+		pwitem, nickname, publicValue, isPerm, isPrivate, keyType,
+		keyUsage, NULL, wincx);
+}
+
+SECStatus
+PK11_ImportEncryptedPrivateKeyInfoAndReturnKey(PK11SlotInfo *slot,
+			SECKEYEncryptedPrivateKeyInfo *epki, SECItem *pwitem,
+			SECItem *nickname, SECItem *publicValue, PRBool isPerm,
+			PRBool isPrivate, KeyType keyType,
+			unsigned int keyUsage, SECKEYPrivateKey **privk,
+			void *wincx)
 {
     CK_MECHANISM_TYPE pbeMechType;
     SECItem *crypto_param = NULL;
@@ -1668,7 +1699,11 @@ try_faulty_3des:
 				 nickname, publicValue, isPerm, isPrivate,
 				 key_type, usage, usageCount, wincx);
     if(privKey) {
-	SECKEY_DestroyPrivateKey(privKey);
+	if (privk) {
+	    *privk = privKey;
+	} else {
+	    SECKEY_DestroyPrivateKey(privKey);
+	}
 	privKey = NULL;
 	rv = SECSuccess;
 	goto done;

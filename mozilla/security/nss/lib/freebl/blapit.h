@@ -38,7 +38,7 @@
  * the terms of any one of the MPL, the GPL or the LGPL.
  *
  * ***** END LICENSE BLOCK ***** */
-/* $Id: blapit.h,v 1.22 2008/12/17 06:09:12 nelson%bolyard.com Exp $ */
+/* $Id: blapit.h,v 1.26 2012/03/28 22:35:14 rrelyea%redhat.com Exp $ */
 
 #ifndef _BLAPIT_H_
 #define _BLAPIT_H_
@@ -88,6 +88,13 @@
  */
 #define MAX_ECKEY_LEN 	        72	/* Bytes */
 
+/* EC point compression format */
+#define EC_POINT_FORM_COMPRESSED_Y0    0x02
+#define EC_POINT_FORM_COMPRESSED_Y1    0x03
+#define EC_POINT_FORM_UNCOMPRESSED     0x04
+#define EC_POINT_FORM_HYBRID_Y0        0x06
+#define EC_POINT_FORM_HYBRID_Y1        0x07
+
 /*
  * Number of bytes each hash algorithm produces
  */
@@ -106,6 +113,7 @@
 #define MD2_BLOCK_LENGTH 	 64 	/* bytes */
 #define MD5_BLOCK_LENGTH 	 64 	/* bytes */
 #define SHA1_BLOCK_LENGTH 	 64 	/* bytes */
+#define SHA224_BLOCK_LENGTH 	 64 	/* bytes */
 #define SHA256_BLOCK_LENGTH 	 64 	/* bytes */
 #define SHA384_BLOCK_LENGTH 	128 	/* bytes */
 #define SHA512_BLOCK_LENGTH 	128 	/* bytes */
@@ -114,6 +122,10 @@
 #define AES_KEY_WRAP_IV_BYTES    8
 #define AES_KEY_WRAP_BLOCK_SIZE  8  /* bytes */
 #define AES_BLOCK_SIZE          16  /* bytes */
+
+#define AES_128_KEY_LENGTH      16  /* bytes */
+#define AES_192_KEY_LENGTH      24  /* bytes */
+#define AES_256_KEY_LENGTH      32  /* bytes */
 
 #define CAMELLIA_BLOCK_SIZE          16  /* bytes */
 
@@ -130,7 +142,7 @@
 #define RSA_MAX_MODULUS_BITS  8192
 #define RSA_MAX_EXPONENT_BITS   64
 #define DH_MIN_P_BITS	       128
-#define DH_MAX_P_BITS         2236
+#define DH_MAX_P_BITS         3072
 
 /*
  * The FIPS 186 algorithm for generating primes P and Q allows only 9
@@ -202,6 +214,8 @@ typedef struct MD2ContextStr        MD2Context;
 typedef struct MD5ContextStr        MD5Context;
 typedef struct SHA1ContextStr       SHA1Context;
 typedef struct SHA256ContextStr     SHA256Context;
+/* SHA224Context is really a SHA256ContextStr.  This is not a mistake. */
+typedef struct SHA256ContextStr     SHA224Context;
 typedef struct SHA512ContextStr     SHA512Context;
 /* SHA384Context is really a SHA512ContextStr.  This is not a mistake. */
 typedef struct SHA512ContextStr     SHA384Context;

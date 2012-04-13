@@ -118,7 +118,11 @@ else
 	OPTIMIZER = -O2
 endif
 ifdef MOZ_DEBUG_SYMBOLS
-	OPTIMIZER  += -gstabs+
+	ifdef MOZ_DEBUG_FLAGS
+		OPTIMIZER += $(MOZ_DEBUG_FLAGS)
+	else
+		OPTIMIZER += -gdwarf-2
+	endif
 endif
 endif
 
@@ -150,6 +154,12 @@ ZDEFS_FLAG		= -Wl,-z,defs
 DSO_LDOPTS		+= $(if $(findstring 2.11.90.0.8,$(shell ld -v)),,$(ZDEFS_FLAG))
 LDFLAGS			+= $(ARCHFLAG)
 
+# On Maemo, we need to use the -rpath-link flag for even the standard system
+# library directories.
+ifdef _SBOX_DIR
+LDFLAGS			+= -Wl,-rpath-link,/usr/lib:/lib
+endif
+
 # INCLUDES += -I/usr/include -Y/usr/include/linux
 G++INCLUDES		= -I/usr/include/g++
 
@@ -157,6 +167,18 @@ G++INCLUDES		= -I/usr/include/g++
 # Always set CPU_TAG on Linux, WINCE.
 #
 CPU_TAG = _$(CPU_ARCH)
+
+#
+# On Linux 2.6 or later, build libfreebl3.so with no NSPR and libnssutil3.so
+# dependencies by default.  Set FREEBL_NO_DEPEND to 0 in the environment to
+# override this.
+#
+ifeq (2.6,$(firstword $(sort 2.6 $(OS_RELEASE))))
+ifndef FREEBL_NO_DEPEND
+FREEBL_NO_DEPEND = 1
+FREEBL_LOWHASH = 1
+endif
+endif
 
 USE_SYSTEM_ZLIB = 1
 ZLIB_LIBS = -lz
@@ -171,3 +193,15 @@ RPATH = -Wl,-rpath,'$$ORIGIN:/opt/sun/private/lib'
 endif
 endif
 
+OS_REL_CFLAGS   += -DLINUX2_1
+MKSHLIB         = $(CC) $(DSO_LDOPTS) -Wl,-soname -Wl,$(@:$(OBJDIR)/%.so=%.so) $(RPATH)
+
+ifdef MAPFILE
+	MKSHLIB += -Wl,--version-script,$(MAPFILE)
+endif
+PROCESS_MAP_FILE = grep -v ';-' $< | \
+        sed -e 's,;+,,' -e 's; DATA ;;' -e 's,;;,,' -e 's,;.*,;,' > $@
+
+ifeq ($(OS_RELEASE),2.4)
+DEFINES += -DNO_FORK_CHECK
+endif

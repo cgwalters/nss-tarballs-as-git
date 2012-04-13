@@ -63,9 +63,36 @@ else
 	RC           = rc.exe
 	MT           = mt.exe
 	# Determine compiler version
+	CC_VERSION  := $(shell $(CC) 2>&1 | sed -ne \
+		's|.* \([0-9]\+\.[0-9]\+\.[0-9]\+\(\.[0-9]\+\)\?\).*|\1|p')
+	# Change the dots to spaces.
+	_CC_VERSION_WORDS := $(subst ., ,$(CC_VERSION))
+	_CC_VMAJOR  := $(word 1,$(_CC_VERSION_WORDS))
+	_CC_VMINOR  := $(word 2,$(_CC_VERSION_WORDS))
+	_CC_RELEASE := $(word 3,$(_CC_VERSION_WORDS))
+	_CC_BUILD   := $(word 4,$(_CC_VERSION_WORDS))
+	_MSC_VER     = $(_CC_VMAJOR)$(_CC_VMINOR)
 	_MSC_VER_6   = 1200
-	_MSC_VER    := $(shell $(CC) 2>&1 | sed -ne \
-                       's/.*[^0-9.]\([0-9]\{1,\}\)\.\([0-9]\{1,\}\).*/\1\2/p' )
+	ifeq ($(_CC_VMAJOR),14)
+	    # -DYNAMICBASE is only supported on VC8SP1 or newer,
+	    # so be very specific here!
+	    # VC8 is 14.00.50727.42, VC8SP1 is 14.00.50727.762
+	    ifeq ($(_CC_RELEASE).$(_CC_BUILD),50727.42)
+		USE_DYNAMICBASE =
+	    else
+	    ifeq ($(_CC_RELEASE).$(_CC_BUILD),50727.762)
+		USE_DYNAMICBASE = 1
+	    else
+		_LOSER := $(error Unknown compiler version $(CC_VERSION))
+	    endif
+	    endif
+	endif
+	# if $(_CC_VMAJOR) >= 15
+	# NOTE: 'sort' sorts the words in lexical order, so this test works
+	# only if $(_CC_VMAJOR) is two digits.
+	ifeq ($(firstword $(sort $(_CC_VMAJOR) 15)),15)
+	    USE_DYNAMICBASE = 1
+	endif
 endif
 
 ifdef BUILD_TREE
@@ -97,9 +124,9 @@ ifdef NS_USE_GCC
     # The -mnop-fun-dllimport flag allows us to avoid a drawback of
     # the dllimport attribute that a pointer to a function marked as
     # dllimport cannot be used as as a constant address.
-    OS_CFLAGS += -mno-cygwin -mms-bitfields -mnop-fun-dllimport
+    OS_CFLAGS += -mwindows -mms-bitfields -mnop-fun-dllimport
     _GEN_IMPORT_LIB=-Wl,--out-implib,$(IMPORT_LIBRARY)
-    DLLFLAGS  += -mno-cygwin -o $@ -shared -Wl,--export-all-symbols $(if $(IMPORT_LIBRARY),$(_GEN_IMPORT_LIB))
+    DLLFLAGS  += -mwindows -o $@ -shared -Wl,--export-all-symbols $(if $(IMPORT_LIBRARY),$(_GEN_IMPORT_LIB))
     ifdef BUILD_OPT
 	ifeq (11,$(ALLOW_OPT_CODE_SIZE)$(OPT_CODE_SIZE))
 		OPTIMIZER += -Os
@@ -116,12 +143,16 @@ ifdef NS_USE_GCC
 	DEFINES    += -DDEBUG -D_DEBUG -UNDEBUG -DDEBUG_$(USERNAME)
     endif
 else # !NS_USE_GCC
-    OS_CFLAGS += -W3 -nologo -D_CRT_SECURE_NO_WARNINGS
+    OS_CFLAGS += -W3 -nologo -D_CRT_SECURE_NO_WARNINGS \
+		 -D_CRT_NONSTDC_NO_WARNINGS
     OS_DLLFLAGS += -nologo -DLL -SUBSYSTEM:WINDOWS
     ifeq ($(_MSC_VER),$(_MSC_VER_6))
     ifndef MOZ_DEBUG_SYMBOLS
 	OS_DLLFLAGS += -PDB:NONE
     endif
+    endif
+    ifdef USE_DYNAMICBASE
+	OS_DLLFLAGS += -DYNAMICBASE
     endif
     ifdef BUILD_OPT
 	OS_CFLAGS  += -MD
@@ -133,7 +164,11 @@ else # !NS_USE_GCC
 	DEFINES    += -UDEBUG -U_DEBUG -DNDEBUG
 	DLLFLAGS   += -OUT:"$@"
 	ifdef MOZ_DEBUG_SYMBOLS
-		OPTIMIZER += -Zi -Fd$(OBJDIR)/
+		ifdef MOZ_DEBUG_FLAGS
+			OPTIMIZER += $(MOZ_DEBUG_FLAGS) -Fd$(OBJDIR)/
+		else
+			OPTIMIZER += -Zi -Fd$(OBJDIR)/
+		endif
 		DLLFLAGS += -DEBUG -OPT:REF
 		LDFLAGS += -DEBUG -OPT:REF
 	endif
@@ -143,7 +178,7 @@ else # !NS_USE_GCC
 	# (RTL) in the debug build
 	#
 	ifdef USE_DEBUG_RTL
-		OS_CFLAGS += -MDd
+		OS_CFLAGS += -MDd -D_CRTDBG_MAP_ALLOC
 	else
 		OS_CFLAGS += -MD
 	endif
@@ -177,7 +212,7 @@ else
 DEFINES += -DWIN32
 endif
 
-ifeq ($(CPU_ARCH), x386)
+ifeq (,$(filter-out x386 x86_64,$(CPU_ARCH)))
 ifdef USE_64
 	DEFINES += -D_AMD64_
 else

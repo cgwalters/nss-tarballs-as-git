@@ -38,7 +38,7 @@
  * Header file for routines specific to S/MIME.  Keep things that are pure
  * pkcs7 out of here; this is for S/MIME policy, S/MIME interoperability, etc.
  *
- * $Id: smime.h,v 1.8 2004/04/25 15:03:16 gerv%gerv.net Exp $
+ * $Id: smime.h,v 1.11 2011/08/21 01:14:18 wtc%google.com Exp $
  */
 
 #ifndef _SECMIME_H_
@@ -83,7 +83,7 @@ extern SECStatus NSS_SMIMEUtil_EnableCipher(long which, int on);
  * Initialize the local recording of the S/MIME policy.
  * This function is called to allow/disallow a particular cipher.
  *
- * XXX This is for a the current module, I think, so local, static storage
+ * XXX This is for the current module, I think, so local, static storage
  * XXX is okay.  Is that correct, or could multiple uses of the same
  * XXX library expect to operate under different policies?
  *
@@ -126,7 +126,7 @@ extern PRBool NSS_SMIMEUtil_EncryptionPossible(void);
  * scans the list of allowed and enabled ciphers and construct a PKCS9-compliant
  * S/MIME capabilities attribute value.
  */
-extern SECStatus NSS_SMIMEUtil_CreateSMIMECapabilities(PLArenaPool *poolp, SECItem *dest, PRBool includeFortezzaCiphers);
+extern SECStatus NSS_SMIMEUtil_CreateSMIMECapabilities(PLArenaPool *poolp, SECItem *dest);
 
 /*
  * NSS_SMIMEUtil_CreateSMIMEEncKeyPrefs - create S/MIME encryption key preferences attr value
@@ -149,6 +149,23 @@ extern CERTCertificate *NSS_SMIMEUtil_GetCertFromEncryptionKeyPreference(CERTCer
  */
 extern SECStatus
 NSS_SMIMEUtil_FindBulkAlgForRecipients(CERTCertificate **rcerts, SECOidTag *bulkalgtag, int *keysize);
+
+/*
+ * Return a boolean that indicates whether the underlying library
+ * will perform as the caller expects.
+ *
+ * The only argument is a string, which should be the version
+ * identifier of the NSS library. That string will be compared
+ * against a string that represents the actual build version of
+ * the S/MIME library.  It also invokes the version checking functions
+ * of the dependent libraries such as NSPR.
+ */
+extern PRBool NSSSMIME_VersionCheck(const char *importedVersion);
+
+/*
+ * Returns a const string of the S/MIME library version.
+ */
+extern const char *NSSSMIME_GetVersion(void);
 
 /************************************************************************/
 SEC_END_PROTOS

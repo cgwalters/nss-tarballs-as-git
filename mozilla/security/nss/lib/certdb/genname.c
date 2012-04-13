@@ -42,6 +42,7 @@
 #include "secder.h"
 #include "certt.h"
 #include "cert.h"
+#include "certi.h"
 #include "xconst.h"
 #include "secerr.h"
 #include "secoid.h"
@@ -1082,17 +1083,31 @@ loser:
     return SECFailure;
 }
 
-/* This function is called by CERT_VerifyCertChain to extract all
-** names from a cert in preparation for a name constraints test.
+/* Extract all names except Subject Common Name from a cert 
+** in preparation for a name constraints test.
 */
 CERTGeneralName *
 CERT_GetCertificateNames(CERTCertificate *cert, PRArenaPool *arena)
 {
+    return CERT_GetConstrainedCertificateNames(cert, arena, PR_FALSE);
+}
+
+/* This function is called by CERT_VerifyCertChain to extract all
+** names from a cert in preparation for a name constraints test.
+*/
+CERTGeneralName *
+CERT_GetConstrainedCertificateNames(CERTCertificate *cert, PRArenaPool *arena,
+                                    PRBool includeSubjectCommonName)
+{
     CERTGeneralName  *DN;
-    CERTGeneralName  *altName         = NULL;
-    SECItem          altNameExtension = {siBuffer, NULL, 0 };
+    CERTGeneralName  *SAN;
+    PRUint32         numDNSNames = 0;
     SECStatus        rv;
 
+    if (!arena) {
+    	PORT_SetError(SEC_ERROR_INVALID_ARGS);
+	return NULL;
+    }
     /* TODO: mark arena */
     DN = CERT_NewGeneralName(arena, certDirectoryName);
     if (DN == NULL) {
@@ -1114,22 +1129,31 @@ CERT_GetCertificateNames(CERTCertificate *cert, PRArenaPool *arena)
         goto loser;
 
     /* Now extract any GeneralNames from the subject name names extension. */
-    rv = CERT_FindCertExtension(cert, SEC_OID_X509_SUBJECT_ALT_NAME, 
-				&altNameExtension);
-    if (rv == SECSuccess) {
-	altName = CERT_DecodeAltNameExtension(arena, &altNameExtension);
-	rv = altName ? SECSuccess : SECFailure;
+    SAN = cert_GetSubjectAltNameList(cert, arena);
+    if (SAN) {
+	numDNSNames = cert_CountDNSPatterns(SAN);
+	DN = cert_CombineNamesLists(DN, SAN);
     }
-    if (rv != SECSuccess && PORT_GetError() == SEC_ERROR_EXTENSION_NOT_FOUND)
-	rv = SECSuccess;
-    if (altNameExtension.data)
-	SECITEM_FreeItem(&altNameExtension, PR_FALSE);
-    if (rv != SECSuccess)
-        goto loser;
-    DN = cert_CombineNamesLists(DN, altName);
-
-    /* TODO: unmark arena */
-    return DN;
+    if (!numDNSNames && includeSubjectCommonName) {
+	char *cn = CERT_GetCommonName(&cert->subject);
+	if (cn) {
+	    CERTGeneralName *CN = CERT_NewGeneralName(arena, certDNSName);
+	    if (CN) {
+		SECItem cnItem = {siBuffer, NULL, 0};
+		cnItem.data = (unsigned char *)cn;
+		cnItem.len  = strlen(cn);
+		rv = SECITEM_CopyItem(arena, &CN->name.other, &cnItem);
+		if (rv == SECSuccess) {
+		    DN = cert_CombineNamesLists(DN, CN);
+	        }
+	    }
+	    PORT_Free(cn);
+	}
+    }
+    if (rv == SECSuccess) {
+	/* TODO: unmark arena */
+	return DN;
+    }
 loser:
     /* TODO: release arena to mark */
     return NULL;
@@ -1659,111 +1683,6 @@ done:
 	*pBadCert = badCert;
 
     return rv;
-}
-
-/* Search the cert for an X509_SUBJECT_ALT_NAME extension.
-** ASN1 Decode it into a list of alternate names.
-** Search the list of alternate names for one with the NETSCAPE_NICKNAME OID.
-** ASN1 Decode that name.  Turn the result into a zString.  
-** Look for duplicate nickname already in the certdb. 
-** If one is found, create a nickname string that is not a duplicate.
-*/
-char *
-CERT_GetNickName(CERTCertificate   *cert,
- 		 CERTCertDBHandle  *handle,
-		 PRArenaPool      *nicknameArena)
-{ 
-    CERTGeneralName  *current;
-    CERTGeneralName  *names;
-    char             *nickname   = NULL;
-    char             *returnName = NULL;
-    char             *basename   = NULL;
-    PRArenaPool      *arena      = NULL;
-    CERTCertificate  *tmpcert;
-    SECStatus        rv;
-    int              count;
-    int              found = 0;
-    SECItem          altNameExtension;
-    SECItem          nick;
-
-    if (handle == NULL) {
-	handle = CERT_GetDefaultCertDB();
-    }
-    altNameExtension.data = NULL;
-    rv = CERT_FindCertExtension(cert, SEC_OID_X509_SUBJECT_ALT_NAME, 
-				&altNameExtension);
-    if (rv != SECSuccess) { 
-	goto loser; 
-    }
-    arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
-    if (arena == NULL) {
-	goto loser;
-    }
-    names = CERT_DecodeAltNameExtension(arena, &altNameExtension);
-    if (names == NULL) {
-	goto loser;
-    } 
-    current = names;
-    do {
-	if (current->type == certOtherName && 
-	    SECOID_FindOIDTag(&current->name.OthName.oid) == 
-	      SEC_OID_NETSCAPE_NICKNAME) {
-	    found = 1;
-	    break;
-	}
-	current = CERT_GetNextGeneralName(current);
-    } while (current != names);
-    if (!found)
-    	goto loser;
-
-    rv = SEC_QuickDERDecodeItem(arena, &nick,
-                            SEC_ASN1_GET(SEC_IA5StringTemplate),
-			    &current->name.OthName.name);
-    if (rv != SECSuccess) {
-	goto loser;
-    }
-
-    /* make a null terminated string out of nick, with room enough at
-    ** the end to add on a number of up to 21 digits in length, (a signed
-    ** 64-bit number in decimal) plus a space and a "#". 
-    */
-    nickname = (char*)PORT_ZAlloc(nick.len + 24);
-    if (!nickname) 
-	goto loser;
-    PORT_Strncpy(nickname, (char *)nick.data, nick.len);
-
-    /* Don't let this cert's nickname duplicate one already in the DB.
-    ** If it does, create a variant of the nickname that doesn't.
-    */
-    count = 0;
-    while ((tmpcert = CERT_FindCertByNickname(handle, nickname)) != NULL) {
-	CERT_DestroyCertificate(tmpcert);
-	if (!basename) {
-	    basename = PORT_Strdup(nickname);
-	    if (!basename)
-		goto loser;
-	}
-	count++;
-	sprintf(nickname, "%s #%d", basename, count);
-    }
-
-    /* success */
-    if (nicknameArena) {
-	returnName =  PORT_ArenaStrdup(nicknameArena, nickname);
-    } else {
-	returnName = nickname;
-	nickname = NULL;
-    }
-loser:
-    if (arena != NULL) 
-	PORT_FreeArena(arena, PR_FALSE);
-    if (nickname)
-	PORT_Free(nickname);
-    if (basename)
-	PORT_Free(basename);
-    if (altNameExtension.data)
-    	PORT_Free(altNameExtension.data);
-    return returnName;
 }
 
 #if 0

@@ -33,7 +33,7 @@
  * the terms of any one of the MPL, the GPL or the LGPL.
  *
  * ***** END LICENSE BLOCK ***** */
-/* $Id: sslmutex.c,v 1.24 2009/06/05 02:34:14 nelson%bolyard.com Exp $ */
+/* $Id: sslmutex.c,v 1.27 2011/10/01 00:11:02 wtc%google.com Exp $ */
 
 #include "seccomon.h"
 /* This ifdef should match the one in sslsnce.c */
@@ -168,7 +168,7 @@ loser:
 }
 
 SECStatus
-sslMutex_Destroy(sslMutex *pMutex)
+sslMutex_Destroy(sslMutex *pMutex, PRBool processLocal)
 {
     if (PR_FALSE == pMutex->isMultiProcess) {
         return single_process_sslMutex_Destroy(pMutex);
@@ -179,6 +179,10 @@ sslMutex_Destroy(sslMutex *pMutex)
     }
     close(pMutex->u.pipeStr.mPipes[0]);
     close(pMutex->u.pipeStr.mPipes[1]);
+
+    if (processLocal) {
+	return SECSuccess;
+    }
 
     pMutex->u.pipeStr.mPipes[0] = -1;
     pMutex->u.pipeStr.mPipes[1] = -1;
@@ -211,7 +215,7 @@ sslMutex_Unlock(sslMutex *pMutex)
 	return SECFailure;
     }
     /* Do Memory Barrier here. */
-    newValue = PR_AtomicDecrement(&pMutex->u.pipeStr.nWaiters);
+    newValue = PR_ATOMIC_DECREMENT(&pMutex->u.pipeStr.nWaiters);
     if (newValue > 0) {
 	int  cc;
 	char c  = 1;
@@ -241,7 +245,7 @@ sslMutex_Lock(sslMutex *pMutex)
 	PORT_SetError(PR_INVALID_ARGUMENT_ERROR);
 	return SECFailure;
     }
-    newValue = PR_AtomicIncrement(&pMutex->u.pipeStr.nWaiters);
+    newValue = PR_ATOMIC_INCREMENT(&pMutex->u.pipeStr.nWaiters);
     /* Do Memory Barrier here. */
     if (newValue > 1) {
 	int   cc;
@@ -409,7 +413,7 @@ sslMutex_Init(sslMutex *pMutex, int shared)
 }
 
 SECStatus
-sslMutex_Destroy(sslMutex *pMutex)
+sslMutex_Destroy(sslMutex *pMutex, PRBool processLocal)
 {
     HANDLE hMutex;
     int    rv;
@@ -435,9 +439,10 @@ sslMutex_Destroy(sslMutex *pMutex)
     }
     
     rv = CloseHandle(hMutex); /* ignore error */
-    if (rv) {
+    if (!processLocal && rv) {
         pMutex->u.sslMutx = hMutex = INVALID_HANDLE_VALUE;
-    } else {
+    }
+    if (!rv) {
         nss_MD_win32_map_default_error(GetLastError());
         retvalue = SECFailure;
     }
@@ -557,11 +562,16 @@ sslMutex_Init(sslMutex *pMutex, int shared)
 }
 
 SECStatus 
-sslMutex_Destroy(sslMutex *pMutex)
+sslMutex_Destroy(sslMutex *pMutex, PRBool processLocal)
 {
     int rv;
     if (PR_FALSE == pMutex->isMultiProcess) {
         return single_process_sslMutex_Destroy(pMutex);
+    }
+
+    /* semaphores are global resources. See SEM_DESTROY(3) man page */
+    if (processLocal) {
+	return SECSuccess;
     }
     do {
 	rv = sem_destroy(&pMutex->u.sem);
@@ -623,7 +633,7 @@ sslMutex_Init(sslMutex *pMutex, int shared)
 }
 
 SECStatus 
-sslMutex_Destroy(sslMutex *pMutex)
+sslMutex_Destroy(sslMutex *pMutex, PRBool processLocal)
 {
     PR_ASSERT(pMutex);
     if (PR_FALSE == pMutex->isMultiProcess) {

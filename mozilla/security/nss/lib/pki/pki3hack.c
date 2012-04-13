@@ -35,7 +35,7 @@
  * ***** END LICENSE BLOCK ***** */
 
 #ifdef DEBUG
-static const char CVS_ID[] = "@(#) $RCSfile: pki3hack.c,v $ $Revision: 1.98 $ $Date: 2009/10/01 17:14:02 $";
+static const char CVS_ID[] = "@(#) $RCSfile: pki3hack.c,v $ $Revision: 1.106 $ $Date: 2012/02/17 22:44:56 $";
 #endif /* DEBUG */
 
 /*
@@ -109,7 +109,7 @@ STAN_InitTokenForSlotInfo(NSSTrustDomain *td, PK11SlotInfo *slot)
     }
     token = nssToken_CreateFromPK11SlotInfo(td, slot);
     PK11Slot_SetNSSToken(slot, token);
-    /* Don't add non-existent token to TD's token list */
+    /* Don't add nonexistent token to TD's token list */
     if (token) {
 	NSSRWLock_LockWrite(td->tokensLock);
 	nssList_Add(td->tokenList, token);
@@ -555,17 +555,17 @@ nssDecodedPKIXCertificate_Destroy (
 
 /* see pk11cert.c:pk11_HandleTrustObject */
 static unsigned int
-get_nss3trust_from_nss4trust(CK_TRUST t)
+get_nss3trust_from_nss4trust(nssTrustLevel t)
 {
     unsigned int rt = 0;
     if (t == nssTrustLevel_Trusted) {
-	rt |= CERTDB_VALID_PEER | CERTDB_TRUSTED;
+	rt |= CERTDB_TERMINAL_RECORD | CERTDB_TRUSTED;
     }
     if (t == nssTrustLevel_TrustedDelegator) {
-	rt |= CERTDB_VALID_CA | CERTDB_TRUSTED_CA /*| CERTDB_NS_TRUSTED_CA*/;
+	rt |= CERTDB_VALID_CA | CERTDB_TRUSTED_CA;
     }
-    if (t == nssTrustLevel_Valid) {
-	rt |= CERTDB_VALID_PEER;
+    if (t == nssTrustLevel_NotTrusted) {
+	rt |= CERTDB_TERMINAL_RECORD;
     }
     if (t == nssTrustLevel_ValidDelegator) {
 	rt |= CERTDB_VALID_CA;
@@ -592,10 +592,6 @@ cert_trust_from_stan_trust(NSSTrust *t, PRArenaPool *arena)
     rvTrust->sslFlags |= client;
     rvTrust->emailFlags = get_nss3trust_from_nss4trust(t->emailProtection);
     rvTrust->objectSigningFlags = get_nss3trust_from_nss4trust(t->codeSigning);
-    /* The cert is a valid step-up cert (in addition to/lieu of trust above */
-    if (t->stepUpApproved) {
-	rvTrust->sslFlags |= CERTDB_GOVT_APPROVED_CA;
-    }
     return rvTrust;
 }
 
@@ -772,6 +768,22 @@ fill_CERTCertificateFields(NSSCertificate *c, CERTCertificate *cc, PRBool forced
     if (context) {
 	/* trust */
 	nssTrust = nssCryptoContext_FindTrustForCertificate(context, c);
+	if (!nssTrust) {
+	    /* chicken and egg issue:
+	     *
+	     * c->issuer and c->serial are empty at this point, but
+	     * nssTrustDomain_FindTrustForCertificate use them to look up
+	     * up the trust object, so we point them to cc->derIssuer and
+	     * cc->serialNumber.
+	     *
+	     * Our caller will fill these in with proper arena copies when we
+	     * return. */
+	    c->issuer.data = cc->derIssuer.data;
+	    c->issuer.size = cc->derIssuer.len;
+	    c->serial.data = cc->serialNumber.data;
+	    c->serial.size = cc->serialNumber.len;
+	    nssTrust = nssTrustDomain_FindTrustForCertificate(context->td, c);
+	}
 	if (nssTrust) {
             trust = cert_trust_from_stan_trust(nssTrust, cc->arena);
             if (trust) {
@@ -817,7 +829,7 @@ fill_CERTCertificateFields(NSSCertificate *c, CERTCertificate *cc, PRBool forced
 
 	/* Assert that it is safe to cast &cc->nsCertType to "PRInt32 *" */
 	PORT_Assert(sizeof(cc->nsCertType) == sizeof(PRInt32));
-	PR_AtomicSet((PRInt32 *)&cc->nsCertType, nsCertType);
+	PR_ATOMIC_SET((PRInt32 *)&cc->nsCertType, nsCertType);
     }
 }
 
@@ -922,13 +934,13 @@ get_stan_trust(unsigned int t, PRBool isClientAuth)
     if (t & CERTDB_TRUSTED) {
 	return nssTrustLevel_Trusted;
     }
+    if (t & CERTDB_TERMINAL_RECORD) {
+	return nssTrustLevel_NotTrusted;
+    }
     if (t & CERTDB_VALID_CA) {
 	return nssTrustLevel_ValidDelegator;
     }
-    if (t & CERTDB_VALID_PEER) {
-	return nssTrustLevel_Valid;
-    }
-    return nssTrustLevel_NotTrusted;
+    return nssTrustLevel_MustVerify;
 }
 
 NSS_EXTERN NSSCertificate *
@@ -1212,6 +1224,98 @@ STAN_ChangeCertTrust(CERTCertificate *cc, CERTCertTrust *trust)
     }
 done:
     (void)nssTrust_Destroy(nssTrust);
+    return nssrv;
+}
+
+/*
+** Delete trust objects matching the given slot.
+** Returns error if a device fails to delete.
+**
+** This function has the side effect of moving the
+** surviving entries to the front of the object list
+** and nullifying the rest.
+*/
+static PRStatus
+DeleteCertTrustMatchingSlot(PK11SlotInfo *pk11slot, nssPKIObject *tObject)
+{
+    int numNotDestroyed = 0;     /* the ones skipped plus the failures */
+    int failureCount = 0;        /* actual deletion failures by devices */
+    int index;
+
+    nssPKIObject_Lock(tObject);
+    /* Keep going even if a module fails to delete. */
+    for (index = 0; index < tObject->numInstances; index++) {
+	nssCryptokiObject *instance = tObject->instances[index];
+	if (!instance) {
+	    continue;
+	}
+
+	/* ReadOnly and not matched treated the same */
+	if (PK11_IsReadOnly(instance->token->pk11slot) ||
+	    pk11slot != instance->token->pk11slot) {
+	    tObject->instances[numNotDestroyed++] = instance;
+	    continue;
+	}
+
+	/* Here we have found a matching one */
+	tObject->instances[index] = NULL;
+	if (nssToken_DeleteStoredObject(instance) == PR_SUCCESS) {
+	    nssCryptokiObject_Destroy(instance);
+	} else {
+	    tObject->instances[numNotDestroyed++] = instance;
+	    failureCount++;
+	}
+
+    }
+    if (numNotDestroyed == 0) {
+    	nss_ZFreeIf(tObject->instances);
+    	tObject->numInstances = 0;
+    } else {
+    	tObject->numInstances = numNotDestroyed;
+    }
+
+    nssPKIObject_Unlock(tObject);
+
+    return failureCount == 0 ? PR_SUCCESS : PR_FAILURE;
+}
+
+/*
+** Delete trust objects matching the slot of the given certificate.
+** Returns an error if any device fails to delete. 
+*/
+NSS_EXTERN PRStatus
+STAN_DeleteCertTrustMatchingSlot(NSSCertificate *c)
+{
+    PRStatus nssrv = PR_SUCCESS;
+
+    NSSTrustDomain *td = STAN_GetDefaultTrustDomain();
+    NSSTrust *nssTrust = nssTrustDomain_FindTrustForCertificate(td, c);
+    /* caller made sure nssTrust isn't NULL */
+    nssPKIObject *tobject = &nssTrust->object;
+    nssPKIObject *cobject = &c->object;
+    int i;
+
+    /* Iterate through the cert and trust object instances looking for
+     * those with matching pk11 slots to delete. Even if some device
+     * can't delete we keep going. Keeping a status variable for the
+     * loop so that once it's failed the other gets set.
+     */
+    NSSRWLock_LockRead(td->tokensLock);
+    nssPKIObject_Lock(cobject);
+    for (i = 0; i < cobject->numInstances; i++) {
+	nssCryptokiObject *cInstance = cobject->instances[i];
+	if (cInstance && !PK11_IsReadOnly(cInstance->token->pk11slot)) {
+		PRStatus status;
+	    if (!tobject->numInstances || !tobject->instances) continue;
+	    status = DeleteCertTrustMatchingSlot(cInstance->token->pk11slot, tobject);
+	    if (status == PR_FAILURE) {
+	    	/* set the outer one but keep going */
+	    	nssrv = PR_FAILURE;
+	    }
+	}
+    }
+    nssPKIObject_Unlock(cobject);
+    NSSRWLock_UnlockRead(td->tokensLock);
     return nssrv;
 }
 

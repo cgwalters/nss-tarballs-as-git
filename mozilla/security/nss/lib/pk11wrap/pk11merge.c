@@ -321,7 +321,7 @@ done:
  *   1) the single byte overflows. On overflow we increment the next byte up 
  *    and so forth until we have overflowed the entire CKA_ID.
  *   2) If we overflow the entire CKA_ID we expand it by one byte.
- *   3) the CKA_ID is non-existant, we create a new one with one byte.
+ *   3) the CKA_ID is non-existent, we create a new one with one byte.
  *    This means no matter what CKA_ID is passed, the result of this function 
  *    is always a new CKA_ID, and this function will never return the same 
  *    CKA_ID the it has returned in the passed.
@@ -1037,13 +1037,11 @@ pk11_mergeTrustEntry(CK_ATTRIBUTE *target, CK_ATTRIBUTE *source)
      * actual trust of the cert (CKT_MUST_VERIFY, CKT_NSS_VALID,
      * CKT_NSS_VALID_DELEGATOR).
      */
-    if ((sourceTrust == CKT_NSS_MUST_VERIFY) 
-	|| (sourceTrust == CKT_NSS_VALID)
+    if ((sourceTrust == CKT_NSS_MUST_VERIFY_TRUST) 
 	|| (sourceTrust == CKT_NSS_VALID_DELEGATOR)) {
 	return USE_TARGET;
     }
-    if ((targetTrust == CKT_NSS_MUST_VERIFY) 
-	|| (targetTrust == CKT_NSS_VALID)
+    if ((targetTrust == CKT_NSS_MUST_VERIFY_TRUST) 
 	|| (targetTrust == CKT_NSS_VALID_DELEGATOR)) {
 	/* source overrites the target */
 	return USE_SOURCE;
@@ -1111,7 +1109,7 @@ pk11_mergeTrust(PK11SlotInfo *targetSlot, PK11SlotInfo *sourceSlot,
 	CK_ULONG trustAttrsCount = 
 		sizeof(trustAttrs)/sizeof(trustAttrs[0]);
 
-	int i;
+	CK_ULONG i;
 	CK_ATTRIBUTE targetTemplate, sourceTemplate;
 
 	/* existing trust record, merge the two together */

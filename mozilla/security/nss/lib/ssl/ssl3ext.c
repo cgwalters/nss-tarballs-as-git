@@ -41,7 +41,7 @@
  * ***** END LICENSE BLOCK ***** */
 
 /* TLS extension code moved here from ssl3ecc.c */
-/* $Id: ssl3ext.c,v 1.13 2010/03/01 20:03:45 alexei.volkov.bugs%sun.com Exp $ */
+/* $Id: ssl3ext.c,v 1.22 2012/03/12 19:14:12 wtc%google.com Exp $ */
 
 #include "nssrenam.h"
 #include "nss.h"
@@ -56,7 +56,7 @@ static unsigned char  key_name[SESS_TICKET_KEY_NAME_LEN];
 static PK11SymKey    *session_ticket_enc_key_pkcs11 = NULL;
 static PK11SymKey    *session_ticket_mac_key_pkcs11 = NULL;
 
-static unsigned char  session_ticket_enc_key[32];
+static unsigned char  session_ticket_enc_key[AES_256_KEY_LENGTH];
 static unsigned char  session_ticket_mac_key[SHA256_LENGTH];
 
 static PRBool         session_ticket_keys_initialized = PR_FALSE;
@@ -78,6 +78,12 @@ static PRInt32 ssl3_SendRenegotiationInfoXtn(sslSocket * ss,
     PRBool append, PRUint32 maxBytes);
 static SECStatus ssl3_HandleRenegotiationInfoXtn(sslSocket *ss, 
     PRUint16 ex_type, SECItem *data);
+static SECStatus ssl3_ClientHandleNextProtoNegoXtn(sslSocket *ss,
+			PRUint16 ex_type, SECItem *data);
+static SECStatus ssl3_ServerHandleNextProtoNegoXtn(sslSocket *ss,
+			PRUint16 ex_type, SECItem *data);
+static PRInt32 ssl3_ClientSendNextProtoNegoXtn(sslSocket *ss, PRBool append,
+					       PRUint32 maxBytes);
 
 /*
  * Write bytes.  Using this function means the SECItem structure
@@ -235,6 +241,7 @@ static const ssl3HelloExtensionHandler clientHelloHandlers[] = {
 #endif
     { ssl_session_ticket_xtn,     &ssl3_ServerHandleSessionTicketXtn },
     { ssl_renegotiation_info_xtn, &ssl3_HandleRenegotiationInfoXtn },
+    { ssl_next_proto_nego_xtn,    &ssl3_ServerHandleNextProtoNegoXtn },
     { -1, NULL }
 };
 
@@ -245,6 +252,7 @@ static const ssl3HelloExtensionHandler serverHelloHandlersTLS[] = {
     /* TODO: add a handler for ssl_ec_point_formats_xtn */
     { ssl_session_ticket_xtn,     &ssl3_ClientHandleSessionTicketXtn },
     { ssl_renegotiation_info_xtn, &ssl3_HandleRenegotiationInfoXtn },
+    { ssl_next_proto_nego_xtn,    &ssl3_ClientHandleNextProtoNegoXtn },
     { -1, NULL }
 };
 
@@ -267,7 +275,8 @@ ssl3HelloExtensionSender clientHelloSendersTLS[SSL_MAX_EXTENSIONS] = {
     { ssl_elliptic_curves_xtn,    &ssl3_SendSupportedCurvesXtn },
     { ssl_ec_point_formats_xtn,   &ssl3_SendSupportedPointFormatsXtn },
 #endif
-    { ssl_session_ticket_xtn,     &ssl3_SendSessionTicketXtn }
+    { ssl_session_ticket_xtn,     &ssl3_SendSessionTicketXtn },
+    { ssl_next_proto_nego_xtn,    &ssl3_ClientSendNextProtoNegoXtn }
     /* any extra entries will appear as { 0, NULL }    */
 };
 
@@ -311,12 +320,14 @@ ssl3_SendServerNameXtn(sslSocket * ss, PRBool append,
                        PRUint32 maxBytes)
 {
     SECStatus rv;
+    if (!ss)
+    	return 0;
     if (!ss->sec.isServer) {
         PRUint32 len;
         PRNetAddr netAddr;
         
         /* must have a hostname */
-        if (!ss || !ss->url || !ss->url[0])
+        if (!ss->url || !ss->url[0])
             return 0;
         /* must not be an IPv4 or IPv6 address */
         if (PR_SUCCESS == PR_StringToNetAddr(ss->url, &netAddr)) {
@@ -529,6 +540,121 @@ ssl3_SendSessionTicketXtn(
 
  loser:
     ss->xtnData.ticketTimestampVerified = PR_FALSE;
+    return -1;
+}
+
+/* handle an incoming Next Protocol Negotiation extension. */
+static SECStatus
+ssl3_ServerHandleNextProtoNegoXtn(sslSocket * ss, PRUint16 ex_type, SECItem *data)
+{
+    if (ss->firstHsDone || data->len != 0) {
+	/* Clients MUST send an empty NPN extension, if any. */
+	PORT_SetError(SSL_ERROR_NEXT_PROTOCOL_DATA_INVALID);
+	return SECFailure;
+    }
+
+    return SECSuccess;
+}
+
+/* ssl3_ValidateNextProtoNego checks that the given block of data is valid: none
+ * of the lengths may be 0 and the sum of the lengths must equal the length of
+ * the block. */
+SECStatus
+ssl3_ValidateNextProtoNego(const unsigned char* data, unsigned int length)
+{
+    unsigned int offset = 0;
+
+    while (offset < length) {
+	unsigned int newOffset = offset + 1 + (unsigned int) data[offset];
+	/* Reject embedded nulls to protect against buggy applications that
+	 * store protocol identifiers in null-terminated strings.
+	 */
+	if (newOffset > length || data[offset] == 0) {
+	    PORT_SetError(SSL_ERROR_NEXT_PROTOCOL_DATA_INVALID);
+	    return SECFailure;
+	}
+	offset = newOffset;
+    }
+
+    if (offset > length) {
+	PORT_SetError(SSL_ERROR_NEXT_PROTOCOL_DATA_INVALID);
+	return SECFailure;
+    }
+
+    return SECSuccess;
+}
+
+static SECStatus
+ssl3_ClientHandleNextProtoNegoXtn(sslSocket *ss, PRUint16 ex_type,
+				  SECItem *data)
+{
+    SECStatus rv;
+    unsigned char resultBuffer[255];
+    SECItem result = { siBuffer, resultBuffer, 0 };
+
+    PORT_Assert(!ss->firstHsDone);
+
+    rv = ssl3_ValidateNextProtoNego(data->data, data->len);
+    if (rv != SECSuccess)
+	return rv;
+
+    /* ss->nextProtoCallback cannot normally be NULL if we negotiated the
+     * extension. However, It is possible that an application erroneously
+     * cleared the callback between the time we sent the ClientHello and now.
+     */
+    PORT_Assert(ss->nextProtoCallback != NULL);
+    if (!ss->nextProtoCallback) {
+	/* XXX Use a better error code. This is an application error, not an
+	 * NSS bug. */
+	PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+	return SECFailure;
+    }
+
+    rv = ss->nextProtoCallback(ss->nextProtoArg, ss->fd, data->data, data->len,
+			       result.data, &result.len, sizeof resultBuffer);
+    if (rv != SECSuccess)
+	return rv;
+    /* If the callback wrote more than allowed to |result| it has corrupted our
+     * stack. */
+    if (result.len > sizeof resultBuffer) {
+	PORT_SetError(SEC_ERROR_OUTPUT_LEN);
+	return SECFailure;
+    }
+
+    SECITEM_FreeItem(&ss->ssl3.nextProto, PR_FALSE);
+    return SECITEM_CopyItem(NULL, &ss->ssl3.nextProto, &result);
+}
+
+static PRInt32
+ssl3_ClientSendNextProtoNegoXtn(sslSocket * ss, PRBool append,
+				PRUint32 maxBytes)
+{
+    PRInt32 extension_length;
+
+    /* Renegotiations do not send this extension. */
+    if (!ss->nextProtoCallback || ss->firstHsDone) {
+	return 0;
+    }
+
+    extension_length = 4;
+
+    if (append && maxBytes >= extension_length) {
+	SECStatus rv;
+	rv = ssl3_AppendHandshakeNumber(ss, ssl_next_proto_nego_xtn, 2);
+	if (rv != SECSuccess)
+	    goto loser;
+	rv = ssl3_AppendHandshakeNumber(ss, 0, 2);
+	if (rv != SECSuccess)
+	    goto loser;
+	ss->xtnData.advertised[ss->xtnData.numAdvertised++] =
+		ssl_next_proto_nego_xtn;
+    } else if (maxBytes < extension_length) {
+	return 0;
+    }
+
+    return extension_length;
+
+loser:
     return -1;
 }
 
@@ -1264,14 +1390,17 @@ no_ticket:
 			SSL_GETPID(), ss->fd));
 	ssl3stats = SSL_GetStatistics();
 	SSL_AtomicIncrementLong(& ssl3stats->hch_sid_ticket_parse_failures );
-	if (sid) {
-	    ssl_FreeSID(sid);
-	    sid = NULL;
-	}
     }
     rv = SECSuccess;
 
 loser:
+	/* ss->sec.ci.sid == sid if it did NOT come here via goto statement
+	 * in that case do not free sid
+	 */
+	if (sid && (ss->sec.ci.sid != sid)) {
+	    ssl_FreeSID(sid);
+	    sid = NULL;
+	}
     if (decrypted_state != NULL) {
 	SECITEM_FreeItem(decrypted_state, PR_TRUE);
 	decrypted_state = NULL;

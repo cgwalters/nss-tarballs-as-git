@@ -92,6 +92,7 @@ STRING fmt_fwVersion[]            = "  firmware version: %d.%d";
 STRING fmt_hwVersion[]            = "  hardware version: %d.%d";
 STRING fmt_s_qsq_d[]              = "    %s = \"%s\" [%d]";
 STRING fmt_s_s_d[]                = "    %s = %s [%d]";
+STRING fmt_s_lu[]                 = "    %s = %lu";
 STRING fmt_invalid_handle[]       = " (CK_INVALID_HANDLE)";
 
 
@@ -110,6 +111,7 @@ static void get_attr_type_str(CK_ATTRIBUTE_TYPE atype, char *str, int len)
     CASE(CKA_VALUE);
     CASE(CKA_OBJECT_ID);
     CASE(CKA_CERTIFICATE_TYPE);
+    CASE(CKA_CERTIFICATE_CATEGORY);
     CASE(CKA_ISSUER);
     CASE(CKA_SERIAL_NUMBER);
     CASE(CKA_AC_ISSUER);
@@ -144,7 +146,7 @@ static void get_attr_type_str(CK_ATTRIBUTE_TYPE atype, char *str, int len)
     CASE(CKA_SUBPRIME);
     CASE(CKA_BASE);
     CASE(CKA_PRIME_BITS);
-    CASE(CKA_SUB_PRIME_BITS);
+    CASE(CKA_SUBPRIME_BITS);
     CASE(CKA_VALUE_BITS);
     CASE(CKA_VALUE_LEN);
     CASE(CKA_EXTRACTABLE);
@@ -161,18 +163,18 @@ static void get_attr_type_str(CK_ATTRIBUTE_TYPE atype, char *str, int len)
     CASE(CKA_RESET_ON_INIT);
     CASE(CKA_HAS_RESET);
     CASE(CKA_VENDOR_DEFINED);
-    CASE(CKA_NETSCAPE_URL);
-    CASE(CKA_NETSCAPE_EMAIL);
-    CASE(CKA_NETSCAPE_SMIME_INFO);
-    CASE(CKA_NETSCAPE_SMIME_TIMESTAMP);
-    CASE(CKA_NETSCAPE_PKCS8_SALT);
-    CASE(CKA_NETSCAPE_PASSWORD_CHECK);
-    CASE(CKA_NETSCAPE_EXPIRES);
-    CASE(CKA_NETSCAPE_KRL);
-    CASE(CKA_NETSCAPE_PQG_COUNTER);
-    CASE(CKA_NETSCAPE_PQG_SEED);
-    CASE(CKA_NETSCAPE_PQG_H);
-    CASE(CKA_NETSCAPE_PQG_SEED_BITS);
+    CASE(CKA_NSS_URL);
+    CASE(CKA_NSS_EMAIL);
+    CASE(CKA_NSS_SMIME_INFO);
+    CASE(CKA_NSS_SMIME_TIMESTAMP);
+    CASE(CKA_NSS_PKCS8_SALT);
+    CASE(CKA_NSS_PASSWORD_CHECK);
+    CASE(CKA_NSS_EXPIRES);
+    CASE(CKA_NSS_KRL);
+    CASE(CKA_NSS_PQG_COUNTER);
+    CASE(CKA_NSS_PQG_SEED);
+    CASE(CKA_NSS_PQG_H);
+    CASE(CKA_NSS_PQG_SEED_BITS);
     CASE(CKA_TRUST);
     CASE(CKA_TRUST_DIGITAL_SIGNATURE);
     CASE(CKA_TRUST_NON_REPUDIATION);
@@ -214,10 +216,10 @@ static void get_obj_class(CK_OBJECT_CLASS objClass, char *str, int len)
     CASE(CKO_SECRET_KEY);
     CASE(CKO_HW_FEATURE);
     CASE(CKO_DOMAIN_PARAMETERS);
-    CASE(CKO_NETSCAPE_CRL);
-    CASE(CKO_NETSCAPE_SMIME);
-    CASE(CKO_NETSCAPE_TRUST);
-    CASE(CKO_NETSCAPE_BUILTIN_ROOT_LIST);
+    CASE(CKO_NSS_CRL);
+    CASE(CKO_NSS_SMIME);
+    CASE(CKO_NSS_TRUST);
+    CASE(CKO_NSS_BUILTIN_ROOT_LIST);
     default: break;
     }
     if (a)
@@ -231,13 +233,12 @@ static void get_trust_val(CK_TRUST trust, char *str, int len)
     const char * a = NULL;
 
     switch (trust) {
-    CASE(CKT_NETSCAPE_TRUSTED);
-    CASE(CKT_NETSCAPE_TRUSTED_DELEGATOR);
-    CASE(CKT_NETSCAPE_UNTRUSTED);
-    CASE(CKT_NETSCAPE_MUST_VERIFY);
-    CASE(CKT_NETSCAPE_TRUST_UNKNOWN);
-    CASE(CKT_NETSCAPE_VALID);
-    CASE(CKT_NETSCAPE_VALID_DELEGATOR);
+    CASE(CKT_NSS_TRUSTED);
+    CASE(CKT_NSS_TRUSTED_DELEGATOR);
+    CASE(CKT_NSS_NOT_TRUSTED);
+    CASE(CKT_NSS_MUST_VERIFY_TRUST);
+    CASE(CKT_NSS_TRUST_UNKNOWN);
+    CASE(CKT_NSS_VALID_DELEGATOR);
     default: break;
     }
     if (a)
@@ -661,14 +662,33 @@ static void print_attr_value(CK_ATTRIBUTE_PTR attr)
     case CKA_KEY_TYPE:
 	if (attr->ulValueLen > 0 && attr->pValue) {
 	    CK_KEY_TYPE keyType = *((CK_KEY_TYPE *)attr->pValue);
-	    get_obj_class(keyType, valstr, sizeof valstr);
+	    get_key_type(keyType, valstr, sizeof valstr);
 	    PR_LOG(modlog, 4, (fmt_s_s_d, 
 	           atype, valstr, attr->ulValueLen));
 	    break;
 	}
+    case CKA_PIXEL_X:
+    case CKA_PIXEL_Y:
+    case CKA_RESOLUTION:
+    case CKA_CHAR_ROWS:
+    case CKA_CHAR_COLUMNS:
+    case CKA_BITS_PER_PIXEL:
+    case CKA_CERTIFICATE_CATEGORY:  /* should print as enum/string */
+    case CKA_JAVA_MIDP_SECURITY_DOMAIN:  /* should print as enum/string */
+    case CKA_MODULUS_BITS:
+    case CKA_PRIME_BITS:
+    case CKA_SUBPRIME_BITS:
+    case CKA_VALUE_BITS:
+    case CKA_VALUE_LEN:
+	if (attr->ulValueLen > 0 && attr->pValue) {
+	    CK_ULONG valueLen = *((CK_ULONG *)attr->pValue);
+	    /* XXX check for the special value CK_UNAVAILABLE_INFORMATION */
+	    PR_LOG(modlog, 4, (fmt_s_lu, atype, (PRUint32)valueLen));
+	    break;
+	}
     case CKA_LABEL:
-    case CKA_NETSCAPE_EMAIL:
-    case CKA_NETSCAPE_URL:
+    case CKA_NSS_EMAIL:
+    case CKA_NSS_URL:
 	if (attr->ulValueLen > 0 && attr->pValue) {
 	    len = PR_MIN(attr->ulValueLen + 1, sizeof valstr);
 	    PR_snprintf(valstr, len, "%s", attr->pValue);
@@ -691,7 +711,8 @@ static void print_attr_value(CK_ATTRIBUTE_PTR attr)
 	    	PORT_Free(asciiName);
 		break;
 	    }
-	    /* else fall through and treat like a binary buffer */
+	    /* else treat like a binary buffer */
+	    goto binary_buffer;
 	}
     case CKA_ID:
 	if (attr->ulValueLen > 0 && attr->pValue) {
@@ -713,6 +734,7 @@ static void print_attr_value(CK_ATTRIBUTE_PTR attr)
 	    }
 	    /* else fall through and treat like a binary buffer */
 	}
+binary_buffer:
     case CKA_SERIAL_NUMBER:
     default:
 	if (attr->ulValueLen > 0 && attr->pValue) {
@@ -902,12 +924,12 @@ static void nssdbg_finish_time(PRInt32 fun_number, PRIntervalTime start)
 
     ival = end-start;
     /* sigh, lie to PRAtomic add and say we are using signed values */
-    PR_AtomicAdd((PRInt32 *)&nssdbg_prof_data[fun_number].time, (PRInt32)ival);
+    PR_ATOMIC_ADD((PRInt32 *)&nssdbg_prof_data[fun_number].time, (PRInt32)ival);
 }
 
 static void nssdbg_start_time(PRInt32 fun_number, PRIntervalTime *start)
 {
-    PR_AtomicIncrement((PRInt32 *)&nssdbg_prof_data[fun_number].calls);
+    PR_ATOMIC_INCREMENT((PRInt32 *)&nssdbg_prof_data[fun_number].calls);
     *start = PR_IntervalNow();
 }
 
@@ -1212,7 +1234,7 @@ CK_RV NSSDBGC_OpenSession(
 {
     COMMON_DEFINITIONS;
 
-    PR_AtomicIncrement((PRInt32 *)&numOpenSessions);
+    PR_ATOMIC_INCREMENT((PRInt32 *)&numOpenSessions);
     maxOpenSessions = PR_MAX(numOpenSessions, maxOpenSessions);
     PR_LOG(modlog, 1, ("C_OpenSession"));
     PR_LOG(modlog, 3, (fmt_slotID, slotID));
@@ -1238,7 +1260,7 @@ CK_RV NSSDBGC_CloseSession(
 {
     COMMON_DEFINITIONS;
 
-    PR_AtomicDecrement((PRInt32 *)&numOpenSessions);
+    PR_ATOMIC_DECREMENT((PRInt32 *)&numOpenSessions);
     PR_LOG(modlog, 1, ("C_CloseSession"));
     log_handle(3, fmt_hSession, hSession);
     nssdbg_start_time(FUNC_C_CLOSESESSION,&start);
