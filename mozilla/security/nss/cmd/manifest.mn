@@ -77,7 +77,6 @@ DIRS = lib  \
  strsclnt \
  symkeyutil \
  tests \
- tstclnt  \
  vfychain \
  vfyserv \
  modutil \
