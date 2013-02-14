@@ -31,7 +31,7 @@ clean:
 	$(MAKE) -C mozilla/security/nss clean
 
 install:
-	install -d -m 755 $(DESTDIR)bin
+	install -d -m 755 $(DESTDIR)$(prefix)/bin
 	install -d -m 755 $(DESTDIR)$(libdir)/nss
 	install -d -m 755 $(DESTDIR)$(prefix)/include/nss
 	install -d -m 755 $(DESTDIR)$(libdir)/pkgconfig
